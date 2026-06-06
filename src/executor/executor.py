@@ -89,6 +89,11 @@ class Executor:
 
         self.mini_calibrate_step_counter = StepCounter(20) # 20스텝마다 한 번씩 캘리브레이션 트리거
 
+        # 회전 중 라이다 맵핑 게이트 임계(스텝당 회전량). 직진 <1°/스텝, 제자리 회전 ~4.5°/스텝.
+        # 회전 중에는 heading이 스텝 경계 값이라 라이다 끝점이 호 모양으로 번짐
+        # (오프라인 재현: 회전 스캔 포함 시 벽 픽셀 +53%, precision 1.0→0.82). ★시뮬 튜닝
+        self.max_mapping_angular_velocity = Angle(2, Angle.DEGREES)
+
         self.color_filter_tuner = ColorFilterTuner(ColorFilter((0, 0, 29), (0, 0, 137)), TUNE_FILTER)
 
 
@@ -136,7 +141,12 @@ class Executor:
     def do_mapping(self):
         """맵핑 기능이 켜져 있을 때(True) 지도를 업데이트합니다."""
         if self.mapping_enabled:
-                if not self.robot.is_shaky(): # 로봇이 크게 흔들리지 않을 때 (정밀도 유지)
+                # 회전 중 라이다 제외: 제자리 회전 중 끝점이 호로 번져 벽 쓰레기를 영구
+                # 누적시킴(클리어링 OFF라 자가수정 없음). 직진 증거만으로 커버리지 충분
+                # (하니스 recall 1.0). init의 의도적 360° 스캔은 게이트하지 않음.
+                rotating = (not self.state_machine.check_state("init")) and \
+                           self.robot.gyroscope.get_angular_velocity() > self.max_mapping_angular_velocity
+                if not self.robot.is_shaky() and not rotating: # 흔들림/회전 없을 때 (정밀도 유지)
                     # 라이다와 카메라를 모두 사용하여 지도 업데이트
                     self.mapper.update(self.robot.get_point_cloud(), 
                                     self.robot.get_out_of_bounds_point_cloud(),
