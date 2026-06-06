@@ -36,7 +36,18 @@ def test_drift_run_quality():
     assert m["precision"] >= PRECISION_FLOOR * 0.7, m
 
 
+def test_recall_detects_missing_walls():
+    """지표 자기검증: 맵에서 내부 세로벽 영역(x=0.24, y 0~0.24)을 지우면
+    recall이 바닥(RECALL_FLOOR) 아래로 떨어져야 한다 — 벽 누락 감지 능력 증명.
+    (역사적 사고: 정제 단계가 희소 확정 벽을 삭제 → 이 지표가 잡아야 하는 모드)"""
+    m = run_quality(demo_maze(), seed=11,
+                    blank_region=((0.22, -0.02), (0.26, 0.26)))
+    print(f"[blank] recall={m['recall']:.3f} (기대: < {RECALL_FLOOR})")
+    assert m["recall"] < RECALL_FLOOR, m
+
+
 if __name__ == "__main__":
     test_clean_run_quality()
     test_drift_run_quality()
+    test_recall_detects_missing_walls()
     print("ALL PASS")

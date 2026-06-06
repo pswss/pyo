@@ -11,10 +11,13 @@ TOL_PX = 2
 LIDAR_REACH = 0.45   # 이 거리 내에서 관측 가능했던 진실 벽만 recall 분모에 포함
 
 
-def run_quality(maze, seed=11, drift_heading_deg=0.0, drift_pos=0.0, knobs=None):
+def run_quality(maze, seed=11, drift_heading_deg=0.0, drift_pos=0.0, knobs=None,
+                blank_region=None):
     """maze를 주행·맵핑하고 품질 지표 dict 반환.
     knobs: {"to_boolean_threshold": int, "wall_close_kernel_px": int,
-            "min_wall_fragment_px": int} 선택적 오버라이드 (튜닝용)."""
+            "min_wall_fragment_px": int} 선택적 오버라이드 (튜닝용).
+    blank_region: ((x0,y0),(x1,y1)) — 지표 계산 직전에 mapped에서 이 월드좌표 사각형을
+                  강제로 지움 (지표 자기검증용: 벽 누락 시 recall 하락 확인)."""
     from harness.mazes import traversal_path
 
     grid = CompoundExpandablePixelGrid(initial_shape=np.array([300, 300]),
@@ -27,6 +30,9 @@ def run_quality(maze, seed=11, drift_heading_deg=0.0, drift_pos=0.0, knobs=None)
             if k == "wall_close_kernel_px":   # 커널 재생성
                 wm._WallMapper__close_kernel_h = np.ones((1, v), np.uint8)
                 wm._WallMapper__close_kernel_v = np.ones((v, 1), np.uint8)
+        # 함정 가드: dp는 max_detected_points(10)에 캡 → 임계가 캡 이상이면 벽이 절대 안 생김
+        assert wm.to_boolean_threshold < wm.max_detected_points, \
+            f"to_boolean_threshold({wm.to_boolean_threshold}) >= max_detected_points({wm.max_detected_points}) → 빈 맵"
 
     rng = np.random.default_rng(seed)
     path = traversal_path(maze)
@@ -46,6 +52,14 @@ def run_quality(maze, seed=11, drift_heading_deg=0.0, drift_pos=0.0, knobs=None)
 
     mapped = grid.arrays["walls"].astype(np.uint8)
 
+    if blank_region is not None:
+        (x0, y0), (x1, y1) = blank_region
+        a = grid.coordinates_to_array_index(np.array([x0, y0], dtype=float))
+        b = grid.coordinates_to_array_index(np.array([x1, y1], dtype=float))
+        r0, r1 = sorted((int(a[0]), int(b[0])))
+        c0, c1 = sorted((int(a[1]), int(b[1])))
+        mapped[r0:r1 + 1, c0:c1 + 1] = 0
+
     # 진실 벽 래스터화 (같은 그리드 인덱스 좌표계)
     true_mask = np.zeros_like(mapped)
     for (p1, p2) in maze["walls"]:
@@ -62,6 +76,8 @@ def run_quality(maze, seed=11, drift_heading_deg=0.0, drift_pos=0.0, knobs=None)
         cv.circle(reach, (int(ai[1]), int(ai[0])), rpx, 1, -1)
     true_reach = true_mask & reach
 
+    # 주의: 유효 허용오차는 TOL_PX(2px)보다 큼 — 맵 벽 자체가 closing으로 2~4px 두께라
+    # 실질 ~5-7px(30-42mm). precision이 0.95(클린)/0.77(드리프트)로 분별력 확인됨.
     kern = np.ones((2 * TOL_PX + 1, 2 * TOL_PX + 1), np.uint8)
     true_dil = cv.dilate(true_reach, kern)
     mapped_dil = cv.dilate(mapped, kern)
