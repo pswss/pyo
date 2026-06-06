@@ -29,7 +29,7 @@ class WallMapper:
         # 벽 확정 임계. 실측 라이다는 희소함(지나가며 잠깐씩, 원거리는 프레임당 1히트 →
         # 매 프레임 dp≤1 필터에 소거) — 6은 기아 상태로 내부 벽 대부분이 영영 확정 못 됨
         # (시뮬 스크린샷 확인). 4 = 원본(3)보다 한 단계만 강한 노이즈 방어. ★시뮬 튜닝
-        self.to_boolean_threshold = 4
+        self.to_boolean_threshold = 5  # 그리드서치 2026-06-06
         self.delete_threshold = 1      # 이 횟수 이하의 감지 포인트는 노이즈로 제거
         # detected_points 상한(폭주 방지). 벽이 더 안 맞으면 몇 프레임 내 해제되도록 작게 유지.
         self.max_detected_points = 10
@@ -48,11 +48,11 @@ class WallMapper:
         self.thinning_window_radius = round(0.55 * self.grid.resolution)
         # 가로/세로 closing 커널 크기(px). 희소하게 확정된 벽 셀들을 벽 방향으로 이어붙임.
         # 커널 5px는 4px(24mm) 이하 틈만 메움 → 실제 통로(최소 반타일 60mm=10px)는 안 막힘. ★시뮬 튜닝
-        self.wall_close_kernel_px = 5
+        self.wall_close_kernel_px = 3  # 그리드서치 2026-06-06
         self.__close_kernel_h = np.ones((1, self.wall_close_kernel_px), np.uint8)
         self.__close_kernel_v = np.ones((self.wall_close_kernel_px, 1), np.uint8)
         # 이보다 작은 고립 부스러기(px 수)는 표시에서 제외 (증거 raw에는 남아서 더 확정되면 복귀)
-        self.min_wall_fragment_px = 3
+        self.min_wall_fragment_px = 2  # 그리드서치 2026-06-06
 
         # 로봇 크기 원형 마스크 (navigation_preference 생성에 사용)
         self.robot_diameter_template = np.zeros((self.robot_diameter, self.robot_diameter), dtype=np.uint8)
