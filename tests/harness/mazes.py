@@ -23,19 +23,16 @@ def demo_maze():
     레이아웃 (타일 단위, 원점 = 좌하단 외곽 모서리):
       - 외곽: (0,0)-(5*TILE, 4*TILE) 사각형
       - 내부 세로벽: x=2*TILE, y∈[0, 2*TILE]  (아래쪽 절반)
-      - 내부 가로벽: y=2*TILE, x∈[2*TILE, 4*TILE], 단 x∈[2.5T, 3T] 구간 60mm 열림
+      - 내부 가로벽: y=2*TILE, x∈[2*TILE, 4*TILE], 단 x∈[2.4T, 2.9T] 구간 60mm 열림
       - 곡선: 중심 (4T, 3T), 반지름 0.5T 사분원 (위-오른쪽 방 모서리)
         - 호는 π/2→π (위→왼쪽), 끝점: (4T, 3.5T)~(3.5T, 3T)
-        - 이 호는 셀 (gx=3, gy=2)↔(gx=3, gy=3) 의 직접 이동을 차단할 수 있으므로
-          gx=3, gy=3 셀은 gx=4, gy=3 또는 gx=2, gy=3 을 통해 우회 도달 가능.
-          DFS 연결성: (4,3)→(4,2), (3,3)→(2,3)→(3,3) 경로 존재해 전 셀 도달 가능.
     """
     W, H = 5 * TILE, 4 * TILE
     walls = [
         ((0, 0), (W, 0)), ((W, 0), (W, H)), ((W, H), (0, H)), ((0, H), (0, 0)),
         ((2 * TILE, 0), (2 * TILE, 2 * TILE)),
-        ((2 * TILE, 2 * TILE), (2.5 * TILE, 2 * TILE)),
-        ((3 * TILE, 2 * TILE), (4 * TILE, 2 * TILE)),
+        ((2 * TILE, 2 * TILE), (2.4 * TILE, 2 * TILE)),
+        ((2.9 * TILE, 2 * TILE), (4 * TILE, 2 * TILE)),
     ]
     walls += _arc(4 * TILE, 3 * TILE, 0.5 * TILE, np.pi / 2, np.pi, n=12)
 
@@ -96,6 +93,9 @@ def traversal_path(maze, step=0.004):
         order.append(nxt)
         stack.append(nxt)
 
+    assert len(visited) == len(cells), \
+        f"도달 불가 셀 존재: {set(cells) - visited}"
+
     # 셀 중심 시퀀스를 step 간격으로 보간 — 포인트만 먼저 수집
     pts = []
     for i in range(len(order) - 1):
@@ -121,7 +121,7 @@ def traversal_path(maze, step=0.004):
                 h = 0.0
         else:
             d = pts[i] - pts[i - 1]
-            n = np.linalg.norm(d)
-            h = float(np.arctan2(d[0], d[1])) if n > 1e-9 else path[-1][1]
+            norm = np.linalg.norm(d)
+            h = float(np.arctan2(d[0], d[1])) if norm > 1e-9 else path[-1][1]
         path.append((pos, h))
     return path
