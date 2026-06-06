@@ -51,9 +51,17 @@ def test_heading_rotates_rays():
     assert da == db
 
 
+def test_empty_walls_all_out_of_bounds():
+    in_pts, out_pts = cast_rays([], np.array([0.0, 0.0]), heading=0.0, n_rays=8)
+    assert in_pts == []
+    assert len(out_pts) == 8
+    assert all(abs(np.hypot(p[0], p[1]) - 0.48) < 1e-9 for p in out_pts)
+
+
 if __name__ == "__main__":
     test_single_wall_straight_ahead()
     test_min_distance_filtered()
     test_nearest_of_two_walls()
     test_heading_rotates_rays()
+    test_empty_walls_all_out_of_bounds()
     print("ALL PASS")

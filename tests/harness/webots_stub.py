@@ -25,6 +25,9 @@ def install_stub():
         def __getattr__(self, n):
             return _Any()
 
+        def __call__(self, *a, **k):
+            return _Any()
+
     fake.Robot = _Any
     fake.__getattr__ = lambda n: _Any
     sys.modules["controller"] = fake

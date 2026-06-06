@@ -16,6 +16,9 @@ def cast_rays(walls, robot_pos, heading=0.0, n_rays=512, max_d=0.48, min_d=0.036
     dx = np.sin(angles)
     dy = np.cos(angles)
 
+    if len(walls) == 0:
+        return [], [[dx[i] * max_d, dy[i] * max_d] for i in range(n_rays)]
+
     seg = np.array(walls, dtype=float)            # (S, 2, 2)
     p = seg[:, 0, :]                              # 세그먼트 시작 (S,2)
     s = seg[:, 1, :] - seg[:, 0, :]               # 세그먼트 벡터 (S,2)
