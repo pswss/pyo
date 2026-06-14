@@ -41,6 +41,10 @@ class Gps(Sensor):
         이력이 회전 구간을 가로지르지 않게 하여 직진 구간만으로 방향을 계산합니다."""
         self.__position_history = [self.position]
 
+    # Pj copy 3 pose_manager 호환 별칭 (동일 동작: 위치 이력 초기화).
+    def reset_orientation_reference(self):
+        self.reset_orientation_baseline()
+
     def get_position(self):
         """GPS 센서에서 현재 전역 위치(x, y)를 읽어 반환합니다. (Webots의 z축 → y축으로 변환)"""
         vals = self.device.getValues()

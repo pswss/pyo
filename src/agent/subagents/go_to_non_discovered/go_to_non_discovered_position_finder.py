@@ -3,7 +3,7 @@ from data_structures.vectors import Position2D
 import numpy as np
 import cv2 as cv
 
-from algorithms.np_bool_array.bfs import BFSAlgorithm, NavigatingBFSAlgorithm, NavigatingLimitedBFSAlgorithm
+from algorithms.np_bool_array.bfs import BFSAlgorithm, NavigatingBFSAlgorithm
 from flags import SHOW_BEST_POSITION_FINDER_DEBUG
 
 from agent.agent_interface import PositionFinderInterface
@@ -23,39 +23,17 @@ class PositionFinder(PositionFinderInterface):
             traversable_function=lambda x: x == False,
             max_result_number=1)
 
-        # 근거리 우선 탐색: 가까운 미탐지(≈0.4m 내)가 있으면 그걸 먼저 선택.
-        # 전역 BFS만 쓰면 외벽 틈으로 새어나간 '맵 밖 미탐지'가 최단으로 잡혀
-        # 웨이포인트가 맵 밖에 찍히는 사례 발생(실런). 근거리에 없을 때만 전역. ★시뮬 튜닝
-        self.near_unseen_finder = NavigatingLimitedBFSAlgorithm(
-            found_function=lambda x: x == False,
-            traversable_function=lambda x: x == False,
-            limit=2500)
-
         # 로봇이 traversable 영역에 있을 때 가장 가까운 통과 가능 위치 탐색
         self.closest_free_point_finder = BFSAlgorithm(lambda x: x == 0)
 
         self.closest_unseen_grid_index = None
 
-        # 주기 재평가: 목표 유지 중에도 N프레임마다 재계산 — 가는 도중 더 가까운
-        # 미탐지가 생기면 갈아탄다(근거리 우선 BFS가 매번 재적용). 없으면 기존 목표
-        # 그대로 다시 나오므로 무해. 실런: 맵 반 바퀴 동선 방지. ★시뮬 튜닝
-        self.recalc_interval_frames = 90
-        self.__frames_since_recalc = 0
-
     def update(self, force_calculation=False):
         """
         목표 위치가 통과 불가 영역이 되었거나 강제 재계산 요청 시 새 미탐색 위치를 찾습니다.
         """
-        # 목표가 이미 discovered 됐으면(가는 도중 시야에 들어옴) 갈 이유 소멸 → 재계산.
-        # 기존엔 '벽이 됐을 때'만 재계산해서, 바로 옆에 새 미탐지가 생겨도 먼 목표를
-        # 끝까지 쫓아감(실런: 시간 낭비).
-        self.__frames_since_recalc += 1
-        if (self.__is_objective_untraversable() or
-                self.__is_objective_already_discovered() or
-                self.__frames_since_recalc >= self.recalc_interval_frames or
-                force_calculation):
+        if self.__is_objective_untraversable() or force_calculation:
             self.closest_unseen_grid_index = self.__get_closest_unseen_grid_index()
-            self.__frames_since_recalc = 0
 
         if SHOW_BEST_POSITION_FINDER_DEBUG:
             debug_grid = self.mapper.pixel_grid.get_colored_grid()
@@ -76,13 +54,6 @@ class PositionFinder(PositionFinderInterface):
     def target_position_exists(self) -> bool:
         return self.closest_unseen_grid_index is not None
 
-    def __is_objective_already_discovered(self):
-        """목표 위치가 이미 시야에 들어와 discovered=True가 됐는지 확인합니다."""
-        if not self.target_position_exists():
-            return False
-        ai = self.mapper.pixel_grid.grid_index_to_array_index(self.closest_unseen_grid_index)
-        return bool(self.mapper.pixel_grid.arrays["discovered"][ai[0], ai[1]])
-
     def __is_objective_untraversable(self):
         """현재 목표 위치가 traversable(통과 불가) 영역이 되었는지 확인합니다."""
         if self.target_position_exists():
@@ -102,16 +73,10 @@ class PositionFinder(PositionFinderInterface):
             self.mapper.robot_position)
         start_node = self.__get_closest_traversable_array_index(robot_array_index)
 
-        # 1차: 근거리 제한 BFS → 2차: 전역 BFS
-        closest_unseen_array_indexes = self.near_unseen_finder.bfs(
-            self.mapper.pixel_grid.arrays["discovered"],
-            self.mapper.pixel_grid.arrays["traversable"],
-            start_node)
-        if not len(closest_unseen_array_indexes):
-            closest_unseen_array_indexes = self.closest_unseen_finder.bfs(
-                found_array=self.mapper.pixel_grid.arrays["discovered"],
-                traversable_array=self.mapper.pixel_grid.arrays["traversable"],
-                start_node=start_node)
+        closest_unseen_array_indexes = self.closest_unseen_finder.bfs(
+            found_array=self.mapper.pixel_grid.arrays["discovered"],
+            traversable_array=self.mapper.pixel_grid.arrays["traversable"],
+            start_node=start_node)
 
         if len(closest_unseen_array_indexes):
             grid_idx = self.mapper.pixel_grid.array_index_to_grid_index(closest_unseen_array_indexes[0])

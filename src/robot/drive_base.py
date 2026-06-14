@@ -34,18 +34,6 @@ class DriveBase:
         # 부드러운 곡선 경로 이동 관리자
         self.movement_manager = SmoothMovementToCoordinatesManager(self.left_wheel, self.right_wheel)
 
-        self.__front_blocked = False
-
-    @property
-    def front_blocked(self) -> bool:
-        return self.__front_blocked
-
-    @front_blocked.setter
-    def front_blocked(self, value: bool):
-        """전방 벽 근접 여부. 이동 관리자에 전파해 전진 모드를 차단한다."""
-        self.__front_blocked = value
-        self.movement_manager.front_blocked = value
-
     def move_wheels(self, left_ratio, right_ratio):
         """좌/우 바퀴를 비율(-1.0~1.0)로 직접 구동합니다."""
         self.left_wheel.move(left_ratio)
@@ -113,12 +101,10 @@ class RotationManager:
         self.first_time = True          # 이번 회전 명령의 첫 호출 여부
         self.finished_rotating = True   # 회전 완료 여부
 
-        # 제자리 회전 속도 상한. 1.0이면 ~8°/step → 자이로 이산적분 오차. 0.5로 낮춰 회전당
-        # 오차↓(회전 감속 전략 C.1). slow_rotation_manager는 생성 후 0.4로 덮어쓰므로 영향 없음. ★시뮬 튜닝.
-        self.max_velocity_cap = 0.5     # 속도 상한
+        self.max_velocity_cap = 1       # 속도 상한
         self.min_velocity_cap = 0.2     # 속도 하한 (너무 느려 멈추지 않도록)
 
-        self.max_velocity = 0.5
+        self.max_velocity = 1
         self.min_velocity = 0.2
 
         self.velocity_reduction_threshold = Angle(10, Angle.DEGREES)  # 이 각도 이하면 속도 절반으로 감속
@@ -259,13 +245,6 @@ class SmoothMovementToCoordinatesManager:
 
         self.turning_speed_multiplier = 0.8
 
-        # 제자리 회전(강한회전 모드) 속도. 풀스피드(1)면 ~8°/step → 노이즈0 자이로도 가감속
-        # transient에서 이산적분 오차 누적. 절반으로 낮춰 회전당 오차↓(회전 감속 전략 C.1). ★시뮬 튜닝.
-        self.in_place_rotation_velocity = 0.5
-
-        # 전방 벽 근접(라이다) 여부. robot.update가 매 프레임 갱신. True면 전진 금지(벽 거리유지).
-        self.front_blocked = False
-
         self.finished_moving = False
 
         self.angle_error_margin = Angle(3, Angle.DEGREES)     # 직진 판정 각도 오차 한계
@@ -287,35 +266,19 @@ class SmoothMovementToCoordinatesManager:
             angle_diff = self.current_angle - angle_to_target
             absolute_angle_diff = self.current_angle.get_absolute_distance_to(angle_to_target)
 
-            # ── 벽 거리유지: 전방에 벽이 너무 가까우면 전진 모드(정렬/곡선) 전부 전진 금지. ──
-            # 강한 회전(>45°)은 원래 제자리 회전이라 안전 → 그대로 통과(아래 분기). 그 외 전진 모드만 차단:
-            # 약간 틀어졌으면 제자리 회전으로 방향만 잡고, 이미 정렬됐으면 정지해 거리를 유지한다.
-            if self.front_blocked and absolute_angle_diff <= self.strong_rotation_start:
-                if absolute_angle_diff < self.angle_error_margin:
-                    self.right_wheel.move(0)
-                    self.left_wheel.move(0)
-                elif 180 > angle_diff.degrees > 0 or angle_diff.degrees < -180:
-                    self.right_wheel.move(self.in_place_rotation_velocity)
-                    self.left_wheel.move(self.in_place_rotation_velocity * -1)
-                else:
-                    self.right_wheel.move(self.in_place_rotation_velocity * -1)
-                    self.left_wheel.move(self.in_place_rotation_velocity)
-                if SHOW_DEBUG: print("[벽거리유지:drive_base.move_to_position] 전방 벽 근접 → 전진 차단(제자리회전/정지)")
-                return
-
             if absolute_angle_diff < self.angle_error_margin:
                 # 거의 정렬된 상태 → 직진
                 self.right_wheel.move(self.velocity)
                 self.left_wheel.move(self.velocity)
 
             elif absolute_angle_diff > self.strong_rotation_start:
-                # 크게 틀어진 상태 → 제자리 회전으로 방향 전환 (감속된 속도로 자이로 정확도↑)
+                # 크게 틀어진 상태 → 제자리 회전으로 방향 전환
                 if 180 > angle_diff.degrees > 0 or angle_diff.degrees < -180:
-                    self.right_wheel.move(self.in_place_rotation_velocity)
-                    self.left_wheel.move(self.in_place_rotation_velocity * -1)
+                    self.right_wheel.move(self.velocity)
+                    self.left_wheel.move(self.velocity * -1)
                 else:
-                    self.right_wheel.move(self.in_place_rotation_velocity * -1)
-                    self.left_wheel.move(self.in_place_rotation_velocity)
+                    self.right_wheel.move(self.velocity * -1)
+                    self.left_wheel.move(self.velocity)
 
             elif absolute_angle_diff < self.light_rotation_start:
                 # 약간 틀어진 상태 → 한쪽 바퀴를 살짝 느리게 하여 곡선 이동

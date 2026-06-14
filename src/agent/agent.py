@@ -10,6 +10,8 @@ from agent.subagents.go_to_non_discovered.go_to_non_discovered_subagent import G
 from agent.subagents.return_to_start.return_to_start_subagent import ReturnToStartAgent
 from agent.subagents.go_to_fixtures.go_to_fixtures_subagent import GoToFixturesAgent
 
+from agent.pathfinding.path_time_calculator import PathTimeCalculator
+
 from flow_control.state_machine import StateMachine
 from flow_control.step_counter import StepCounter
 
@@ -24,70 +26,25 @@ class SubagentPriorityCombiner(SubagentInterface):
     2. FollowWallsAgent   - 벽 가까이 이동하여 조난자 마킹 가능성 높이기
     3. GoToNonDiscoveredAgent - 아직 탐색 못한 곳으로 이동
     """
-    def __init__(self, agents: list, switch_debounce_frames=10) -> None:
+    def __init__(self, agents: list) -> None:
         self.__agent_list = agents
         self.__current_agent_index = 0
         self.__previous_agent_index = 0
-        # 승급 히스테리시스: 상위 에이전트 후보가 프레임마다 생겼다 사라지는 플래핑이
-        # 4~6프레임마다 전환→목표 널뜀→직진 불가→GPS heading 보정 게이트(연속직진)
-        # 영영 미달→자이로 드리프트→맵 휘어짐으로 이어진 것을 실런 로그로 확인.
-        # 상위로의 전환은 해당 에이전트가 이 프레임 수만큼 연속 목표를 유지할 때만 허용.
-        # 강등(현재 목표 소실)은 즉시. ★시뮬 튜닝
-        self.__switch_debounce_frames = switch_debounce_frames
-        self.__candidate_index = None
-        self.__candidate_frames = 0
-
-    @property
-    def current_agent_index(self) -> int:
-        return self.__current_agent_index
 
     def update(self, force_calculation=False) -> None:
-        """우선순위대로 갱신하되, 상위 승급은 디바운스·강등은 즉시인 히스테리시스 선택."""
+        """에이전트를 우선순위대로 시도하여 유효한 목표가 나오는 첫 번째 에이전트를 선택합니다."""
         agent: SubagentInterface
-        best_index = None  # 이번 프레임 목표 보유 최상위 에이전트
         for index, agent in enumerate(self.__agent_list):
             agent.update(force_calculation=self.__agent_changed() or force_calculation)
             if agent.target_position_exists():
-                best_index = index
+                prev = self.__current_agent_index
+                self.__previous_agent_index = prev
+                self.__current_agent_index = index
+                if prev != index:
+                    prev_name = type(self.__agent_list[prev]).__name__
+                    curr_name = type(self.__agent_list[index]).__name__
+                    print(f"[에이전트:agent.update] 서브에이전트 전환: {prev_name} → {curr_name}")
                 break
-
-        current = self.__current_agent_index
-        # 현재 에이전트도 매 프레임 갱신 보장 (best가 더 상위라 루프가 일찍 끊겼을 때)
-        if best_index is not None and best_index < current:
-            self.__agent_list[current].update(force_calculation=force_calculation)
-
-        new_index = current
-        if best_index is None:
-            # 아무도 목표 없음 → 현재 유지 (다음 프레임 재시도)
-            self.__candidate_index = None
-            self.__candidate_frames = 0
-        elif not self.__agent_list[current].target_position_exists():
-            # 강등: 현재 에이전트 목표 소실 → 즉시 전환
-            new_index = best_index
-            self.__candidate_index = None
-            self.__candidate_frames = 0
-        elif best_index < current:
-            # 승급 후보: 연속 유지 프레임 디바운스
-            if self.__candidate_index == best_index:
-                self.__candidate_frames += 1
-            else:
-                self.__candidate_index = best_index
-                self.__candidate_frames = 1
-            if self.__candidate_frames >= self.__switch_debounce_frames:
-                new_index = best_index
-                self.__candidate_index = None
-                self.__candidate_frames = 0
-        else:
-            # 현재가 최상위거나 동일 → 유지
-            self.__candidate_index = None
-            self.__candidate_frames = 0
-
-        self.__previous_agent_index = current
-        self.__current_agent_index = new_index
-        if new_index != current:
-            prev_name = type(self.__agent_list[current]).__name__
-            curr_name = type(self.__agent_list[new_index]).__name__
-            print(f"[에이전트:agent.update] 서브에이전트 전환: {prev_name} → {curr_name}")
 
     def get_target_position(self) -> Position2D:
         """현재 선택된 에이전트의 목표 좌표를 반환합니다."""
@@ -135,10 +92,13 @@ class Agent(AgentInterface):
         self.end_reached_distance_threshold = 0.04  # 시작점으로부터 이 거리 이내 = 복귀 완료
         self.max_time = 8 * 60  # 최대 미션 시간(초)
 
+        self.__path_time_calculator_step_counter = StepCounter(300)
+        self.__path_time_calculator = PathTimeCalculator(self.__mapper, 0.06, 0.01)
+
         self.__target_position = None
         self.__return_log_counter = StepCounter(200)  # 복귀 중 200스텝마다 위치 로그
         self.__no_target_consecutive = 0             # 탐색 목표 없음 연속 프레임 카운터
-        self.__no_target_threshold = 120             # 이 프레임 수 연속으로 목표 없으면 복귀 전환
+        self.__no_target_threshold = 60              # 이 프레임 수 연속으로 목표 없으면 복귀 전환
 
     def update(self) -> None:
         """매 타임스텝 호출: 현재 단계에 맞는 목표 위치를 계산합니다."""

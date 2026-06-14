@@ -68,43 +68,33 @@ class PositionFinder(PositionFinderInterface):
         3. 늪지대 제거
         4. BFS로 탐색 가능한 가장 가까운 위치 선택
         """
-        # ※ 반드시 복사본에서 연산 — 공유 레이어를 in-place 변형하면 15스텝 주기
-        # 재생성과 맞물려 후보 집합이 프레임마다 출렁(목표 플립 → 늪 경계 왕복 진동,
-        # 출발 전 두리번거림). GoToFixtures도 같은 레이어를 읽으므로 오염 금지.
-        possible_targets_array = self.__mapper.pixel_grid.arrays["fixture_distance_margin"].copy()
+        possible_targets_array = self.__mapper.pixel_grid.arrays["fixture_distance_margin"]
 
         # 주변 포인트가 부족한 고립 후보 제거
         isolated = cv.filter2D(
-            possible_targets_array.astype(np.uint8),
+            self.__mapper.pixel_grid.arrays["fixture_distance_margin"].astype(np.uint8),
             -1, self.smoother_template) < self.min_number_to_be_valid
         possible_targets_array[isolated] = False
 
         # 격자 패턴으로 후보 희소화 (연산 효율화)
         self.__dither_array(possible_targets_array, dither_interval=2)
 
-        # 이미 가본 곳 제거 — 풋프린트(traversed) 기준. 중심 궤적만 빼면 지나온 통로의
-        # 벽 마진이 후보로 부활해 가본 곳에 웨이포인트가 찍힘(실런).
-        possible_targets_array[self.__mapper.pixel_grid.arrays["traversed"]] = False
+        # 이미 지나간 중심 경로 위치 제거
+        possible_targets_array[self.__mapper.pixel_grid.arrays["robot_center_traversed"]] = False
         # 통과 불가 영역 내 후보 제거
-        possible_targets_array[self.__mapper.pixel_grid.arrays["traversable"]] = False
+        self.__mapper.pixel_grid.arrays["fixture_distance_margin"][
+            self.__mapper.pixel_grid.arrays["traversable"]] = False
         # 늪지대 위 후보 제거
-        possible_targets_array[self.__mapper.pixel_grid.arrays["swamps"]] = False
-
-        robot_array_index = self.__mapper.pixel_grid.grid_index_to_array_index(
-            self.__mapper.robot_grid_index)
-
-        # 로봇 코앞(<4.5cm) 마이크로 목표 제거: 2~3cm 목표 연발 = 조향만 하다 시간 낭비
-        # + 직진 구간 소멸(GPS heading 보정 불가). ★시뮬 튜닝
-        r_excl = round(0.045 * self.__mapper.pixel_grid.resolution)
-        r0 = max(int(robot_array_index[0]) - r_excl, 0)
-        c0 = max(int(robot_array_index[1]) - r_excl, 0)
-        possible_targets_array[r0:int(robot_array_index[0]) + r_excl + 1,
-                               c0:int(robot_array_index[1]) + r_excl + 1] = False
+        self.__mapper.pixel_grid.arrays["fixture_distance_margin"][
+            self.__mapper.pixel_grid.arrays["swamps"]] = False
 
         if not np.any(possible_targets_array):
             print("[벽 추종:follow_walls_position_finder.__calculate_position] 후보 위치 없음: fixture_distance_margin에 유효한 미방문 위치가 없습니다")
             self.__target = None
             return
+
+        robot_array_index = self.__mapper.pixel_grid.grid_index_to_array_index(
+            self.__mapper.robot_grid_index)
 
         results = self.__next_position_finder.bfs(
             possible_targets_array,
