@@ -9,7 +9,7 @@ class ColorFilter:
     lower_hsv ~ upper_hsv 범위에 해당하는 픽셀의 이진 마스크를 반환합니다.
 
     사용 예:
-    - 조난자 이미지에서 검정/흰색/노란색/빨간색 픽셀 추출 (fixture 분류)
+    - wall token 이미지에서 검정/흰색/빨강/노랑/초록/파랑 픽셀 추출
     - 바닥 타일에서 구멍/늪지대/체크포인트 색상 추출
     - 벽 색상 추출 (fixture 후보에서 벽 제거)
     """
@@ -28,22 +28,3 @@ class ColorFilter:
         # HSV 범위 내 픽셀만 255로 표시하는 마스크 생성
         mask = cv.inRange(hsv_image, self.lower, self.upper)
         return mask
-
-
-WALL_COLOR_FILTER = ColorFilter((90, 44, 0), (95, 213, 158))
-
-
-def get_wall_mask(image: np.ndarray) -> np.ndarray:
-    """벽 색상 영역을 채워진 마스크로 반환합니다."""
-    margin = 1
-    raw_wall = WALL_COLOR_FILTER.filter(image)
-    wall = np.ones(shape=(raw_wall.shape[0], raw_wall.shape[1] + margin * 2), dtype=np.uint8) * 255
-    wall[:, margin:-margin] = raw_wall
-    conts, _ = cv.findContours(wall, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
-    filled_wall = np.zeros_like(wall, dtype=np.bool_)
-    for c in conts:
-        this_cont = np.zeros_like(wall, dtype=np.uint8)
-        cv.fillPoly(this_cont, [c,], 255)
-        filled_wall += this_cont > 0
-    filled_wall = filled_wall[:, margin:-margin]
-    return filled_wall
