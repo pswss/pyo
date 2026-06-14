@@ -3,7 +3,7 @@ from fixture_detection.color_filter import ColorFilter
 
 class NonFixtureFilter:
     """
-    2026 wall token(letter victim/cognitive target)이 아닌 배경 색상을 감지하는 필터입니다.
+    fixture(조난자/위험물 표지)가 아닌 배경 색상을 감지하는 필터입니다.
 
     카메라 이미지에서 벽, 바닥, 장애물, 구멍 등 fixture가 아닌
     알려진 배경 색상들을 마스킹하여, fixture 분류 시
