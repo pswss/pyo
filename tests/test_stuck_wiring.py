@@ -82,11 +82,13 @@ def test_lop_request_after_repeated_wiggle_failures():
     ex.stuck_detector.stuck_counter = 100  # 계속 끼인 상태 유지(탈출 실패 모사)
 
     # 1, 2회차: wiggle 탈출 시도 → stuck 전환, LoP 신고 없음
+    # (stuck 전환 시 감지기 reset되므로, 복귀 후 '여전히 끼임'은 재감지로 모사)
     for attempt in (1, 2):
         ex.check_stuck()
         assert ex.state_machine.state == "stuck", f"{attempt}회차는 wiggle(stuck)이어야 함"
         assert ex._lop.calls == 0, f"{attempt}회차에 LoP 신고하면 안 됨"
-        ex.state_machine.state = "explore"  # 탈출 시퀀스 종료 후 explore 복귀 모사(여전히 끼임)
+        ex.state_machine.state = "explore"  # 탈출 시퀀스 종료 후 explore 복귀 모사
+        ex.stuck_detector.stuck_counter = 100  # 탈출 실패: 끼임 재감지 모사
 
     # 3회차: 임계 도달 → LoP 신고, 상태 전환 없음(게임매니저가 순간이동)
     ex.check_stuck()

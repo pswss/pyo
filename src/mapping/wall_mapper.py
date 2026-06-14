@@ -181,7 +181,11 @@ class WallMapper:
     def occupy_point(self, point_array_index):
         """
         해당 위치의 감지 카운터를 증가시키고(상한까지), 임계값 초과 시 벽으로 확정합니다.
-        단, 이미 로봇이 지나간 곳(traversed)은 벽으로 등록하지 않습니다.
+        단, 로봇 '중심'이 지나간 곳(robot_center_traversed)은 벽으로 등록하지 않습니다.
+        ※ 풋프린트 전체(traversed)를 기준으로 거부하면, 포즈 오차 1~2cm로 풋프린트
+        가장자리가 1cm(1.7px) 두께 벽 라인을 덮는 순간 그 벽이 영구 등록 불가가 됨
+        (실런 증상: 가까이 간 벽이 안 찍힘). 중심 궤적(~2cm)은 진짜 벽일 수 없는
+        최소 영역만 거부한다.
         벽 확정 후에도 계속 증가시켜(빔이 계속 맞으면 보충) clear_free_space의 감소와 균형을 맞춘다.
         """
         i, j = point_array_index[0], point_array_index[1]
@@ -189,7 +193,18 @@ class WallMapper:
         if dp[i, j] < self.max_detected_points:
             dp[i, j] += 1
 
-        if dp[i, j] > self.to_boolean_threshold and not self.grid.arrays["traversed"][i, j]:
+        # 절충 거부 규칙 (실런 2회로 캘리브):
+        # - 중심 궤적: 무조건 거부 (그 자리에 벽 불가)
+        # - 풋프린트(traversed): 기본 거부, 단 dp 상한 도달 셀은 허용 —
+        #   무조건 거부면 포즈 오차로 근접 벽 영구 미등록, 중심만 거부면 통로 안쪽
+        #   노이즈 끝점이 누적 등록(궤적 주변 얼룩 + 외벽 틈 → 웨이포인트 맵 밖 누수).
+        #   상한 도달 = 지속 스캔된 강한 증거 = 진짜 벽. ★시뮬 튜닝
+        if dp[i, j] > self.to_boolean_threshold:
+            if self.grid.arrays["robot_center_traversed"][i, j]:
+                return
+            if (self.grid.arrays["traversed"][i, j]
+                    and dp[i, j] < self.max_detected_points):
+                return
             self.grid.arrays["walls_raw"][i, j] = True
 
     def thin_walls(self, robot_array_index):

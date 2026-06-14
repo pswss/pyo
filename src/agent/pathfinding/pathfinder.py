@@ -133,19 +133,26 @@ class PathFinder():
 
     def __calculate_path_index(self):
         """
-        현재 로봇이 경로상 노드에 충분히 가까워지면(< 3픽셀) 다음 노드로 인덱스를 전진합니다.
+        로봇 기준 lookahead(8px≈5cm) 안의 노드들은 건너뛰고 그 너머 첫 노드를 목표로
+        유지합니다(pure-pursuit식 선행 추종).
+        ※ 기존 임계 3px + 노드 간격 2px = 목표가 항상 1.2~2.4cm 앞 → 2cm마다
+        도착·재조준으로 이동이 뚝뚝 끊기고 직진 구간이 없어 GPS heading 보정도 불가
+        (실런 로그: '목표까지 거리 0.02m' 연발). 마지막 노드는 보존되므로 최종
+        도착 정밀도는 유지. ★시뮬 튜닝
         """
         self.__a_star_index = min(self.__a_star_index, len(self.__a_star_path) - 1)
         if len(self.__a_star_path) > 0:
-            next_node = self.__a_star_path[self.__a_star_index]
-            next_node = Position2D(next_node)
-
+            lookahead_px = 8
             current_grid_index = self.__mapper.pixel_grid.coordinates_to_grid_index(self.__mapper.robot_position)
             current_node = Position2D(current_grid_index[0], current_grid_index[1])
 
-            # 3픽셀 이내로 접근 시 다음 경로 노드로 전진
-            if abs(current_node.get_distance_to(next_node)) < 3:
-                self.__a_star_index += 1
+            # lookahead 안의 노드는 모두 통과 처리하고 그 너머 첫 노드를 목표로
+            while self.__a_star_index < len(self.__a_star_path) - 1:
+                next_node = Position2D(self.__a_star_path[self.__a_star_index])
+                if abs(current_node.get_distance_to(next_node)) < lookahead_px:
+                    self.__a_star_index += 1
+                else:
+                    break
 
     def __dither_path(self, path):
         """

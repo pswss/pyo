@@ -190,12 +190,12 @@ class FloorMatrixCreator:
     def __init__(self, square_size_px: int) -> None:
         self.__square_size_px = square_size_px * 2  # 바닥 타일은 2배 크기
         # 타일 코드별 HSV 범위와 비율 임계값
+        # 규정 §5.6.10.b.ii: 통로 코드는 b/y/g/p/o/r "문자" (숫자 6/7/8 아님 — 기존
+        # 숫자 제출은 통로 셀 전부 불일치로 채점됨). 라벨이 아닌 실측 hue 기준으로 매핑:
+        # 파랑(H120)=b(1↔2), 보라(H132)=p(2↔3), 빨강(H0)=r(3↔4). 파/보/빨의 S/V 범위는
+        # 기존 시뮬 실측값 유지. 노랑=y(1↔3)/초록=g(1↔4)/주황=o(2↔4)는 표준 hue 범위
+        # 신규 추가. ★시뮬 튜닝
         self.__floor_color_ranges = {
-                    "0": # 일반 바닥
-                        {
-                            "range":   ((0, 0, 37), (0, 0, 192)),
-                            "threshold":0.2},
-
                     "0": # 빈 공간 (void)
                         {
                             "range":((100, 0, 0), (101, 1, 1)),
@@ -215,19 +215,34 @@ class FloorMatrixCreator:
                             "range":((19, 112, 32), (19, 141, 166)),
                             "threshold":0.2},
 
-                    "6": # 레벨 1-2 연결
+                    "b": # 통로 1↔2 (파랑)
                         {
                             "range":((120, 182, 49), (120, 204, 232)),
                             "threshold":0.2},
 
-                    "8": # 레벨 3-4 연결
+                    "p": # 통로 2↔3 (보라)
                         {
                             "range":((132, 156, 36), (133, 192, 185)),
                             "threshold":0.2},
 
-                    "7": # 레벨 2-3 연결
+                    "r": # 통로 3↔4 (빨강)
                         {
-                            "range":((0, 182, 49), (0, 204, 232)),
+                            "range":((0, 150, 49), (5, 255, 232)),
+                            "threshold":0.2},
+
+                    "y": # 통로 1↔3 (노랑) ★시뮬 튜닝
+                        {
+                            "range":((25, 150, 80), (35, 255, 255)),
+                            "threshold":0.2},
+
+                    "g": # 통로 1↔4 (초록) ★시뮬 튜닝
+                        {
+                            "range":((50, 150, 50), (70, 255, 255)),
+                            "threshold":0.2},
+
+                    "o": # 통로 2↔4 (주황) ★시뮬 튜닝
+                        {
+                            "range":((10, 150, 80), (20, 255, 255)),
                             "threshold":0.2},
                     }
 
@@ -316,7 +331,8 @@ class FinalMatrixCreator:
         self.floor_matrix_creator = FloorMatrixCreator(self.__square_size_px)
 
 
-    def pixel_grid_to_final_grid(self, pixel_grid: CompoundExpandablePixelGrid, robot_start_position: np.ndarray) -> np.ndarray:
+    def pixel_grid_to_final_grid(self, pixel_grid: CompoundExpandablePixelGrid, robot_start_position: np.ndarray,
+                                 area4_positions=None) -> np.ndarray:
         """
         픽셀 그리드 전체를 최종 텍스트 매트릭스로 변환합니다.
 
@@ -367,7 +383,32 @@ class FinalMatrixCreator:
         # 벽 노드 + 바닥 코드 + 시작 위치 + 장애물을 하나의 텍스트 그리드로 합성
         text_grid = self.__get_final_text_grid(wall_node_array, floor_string_array, robot_node, obstacle_tile_array)
 
+        # Area 4 타일 '*' 채움 (규정 §5.6.10.c / MapAnswer.py: room==4 → 5×5 전부 '*').
+        # '*' 미기록은 area4 셀 전부 불일치 = 최대 감점원 (world2 실측: 일치율 ~46%).
+        if area4_positions:
+            self.__fill_area4(text_grid, pixel_grid, offsets, area4_positions)
+
         return np.array(text_grid)
+
+    def __fill_area4(self, text_grid: list, pixel_grid: CompoundExpandablePixelGrid,
+                     offsets: np.ndarray, area4_positions) -> None:
+        """Area 4 체류 위치들이 속한 타일의 5×5 셀 블록을 '*'로 채웁니다 (경계 포함)."""
+        filled_tiles = set()
+        rows, cols = len(text_grid), len(text_grid[0]) if text_grid else 0
+        for pos in area4_positions:
+            arr = pixel_grid.coordinates_to_array_index(np.array([pos.x, pos.y])) - offsets
+            quarter = arr // self.__square_size_px        # 쿼터타일 인덱스
+            tile = (int(quarter[0]) // 2, int(quarter[1]) // 2)
+            if tile in filled_tiles:
+                continue
+            filled_tiles.add(tile)
+            r0, c0 = tile[0] * 4, tile[1] * 4
+            for r in range(r0, r0 + 5):
+                for c in range(c0, c0 + 5):
+                    if 0 <= r < rows and 0 <= c < cols:
+                        text_grid[r][c] = "*"
+        if filled_tiles:
+            print(f"[최종맵:final_matrix_creator] Area4 타일 {len(filled_tiles)}개 '*' 채움")
 
     def __get_final_text_grid(self, wall_node_array: np.ndarray, floor_type_array: np.ndarray, robot_node: np.ndarray, obstacle_tile_array: list) -> list:
         """

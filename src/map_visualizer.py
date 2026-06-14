@@ -113,11 +113,16 @@ class MapVisualizer:
         # ── 5. 벽/장애물 (occupied) ───────────────────────────────────
         image[arrays["occupied"]] = _COLORS["wall"]
 
-        # ── 6. 조난자 위치 (작은 원) ──────────────────────────────────
-        victim_positions = np.argwhere(arrays["victims"])
-        for pos in victim_positions:
-            cv.circle(image, (pos[1], pos[0]), 5, _COLORS["victim"], -1)
-            cv.circle(image, (pos[1], pos[0]), 5, (255, 255, 255), 1)  # 흰색 테두리로 더 선명하게
+        # ── 6. 조난자 위치 (뭉치당 마커 1개) ──────────────────────────
+        # 픽셀마다 원을 그리면 인접 감지 픽셀이 뭉쳐 거대한 해 모양이 됨 →
+        # 연결 성분(connected component)별 중심에 작은 원 하나만 표시.
+        victims_mask = arrays["victims"].astype(np.uint8)
+        if victims_mask.any():
+            n_comp, _, _, centroids = cv.connectedComponentsWithStats(victims_mask)
+            for i in range(1, n_comp):
+                pt = (int(centroids[i][0]), int(centroids[i][1]))
+                cv.circle(image, pt, 3, _COLORS["victim"], -1)
+                cv.circle(image, pt, 3, (255, 255, 255), 1)  # 흰색 테두리로 더 선명하게
 
         # ── 7. A* 계획 경로 선 ────────────────────────────────────────
         if len(self._path) >= 2:
