@@ -499,24 +499,31 @@ class Executor:
             self.seq_align_with_fixture()
             self.seq_move_wheels(0, 0)
 
-            # 다시 한 번 카메라로 확실하게 글자(H, S, U 등) 식별
+            # 다시 한 번 카메라로 확실하게 글자(H, S, U 등) 식별.
+            # 탐지는 3개 카메라(좌/중/우) 전부로 하는데 재확인을 center만 보면, 측면 카메라로
+            # 처음 잡힌 토큰이 회전 오차로 center에 안 들어와 '소실'로 오판→블랙리스트+쿨다운으로
+            # 영구 누락되는 일이 잦았다(토큰 대량 누락 원인). 그래서 3개 카메라를 모두 확인한다.
             if self.sequencer.simple_event():
-                center_image = self.robot.center_camera.image.image
-                fixtures = self.fixture_detector.find_fixtures(center_image)
-            
+                reconfirmed = None
+                for cam in (self.robot.center_camera, self.robot.right_camera, self.robot.left_camera):
+                    cam_fixtures = self.fixture_detector.find_fixtures(cam.image.image)
+                    if cam_fixtures:
+                        reconfirmed = cam_fixtures[0]
+                        break
+
                 # 만약 놓쳤으면 쿨하게 다시 탐색으로 복귀
-                if len(fixtures) == 0:
+                if reconfirmed is None:
                     # 재확인 실패 = 오탐. 이 위치를 블랙리스트에 올리고
                     # 쿨다운 동안 감지를 억제하여 로봇이 해당 구역을 벗어날 시간을 줍니다.
                     self.mapper.fixture_mapper.map_detected_fixture(self.robot.position)
                     self.fixture_detection_cooldown = 150  # ~150프레임(≈4.8초) 동안 감지 스킵
-                    print(f"[조난자 보고:executor.state_report_fixture] ✗ 재확인 중 fixture 소실 → 오탐 블랙리스트 등록 + {self.fixture_detection_cooldown}프레임 쿨다운 후 explore 복귀")
+                    print(f"[조난자 보고:executor.state_report_fixture] ✗ 재확인 중 fixture 소실(3캠) → 오탐 블랙리스트 등록 + {self.fixture_detection_cooldown}프레임 쿨다운 후 explore 복귀")
                     change_state_function("explore")
                     self.sequencer.reset_sequence()
                     self.mapping_enabled = True
                     return
 
-                self.letter_to_report = self.fixture_detector.classify_fixture(fixtures[0])
+                self.letter_to_report = self.fixture_detector.classify_fixture(reconfirmed)
                 if self.letter_to_report is None:
                     print("[조난자 보고:executor.state_report_fixture] ✗ 글자 인식 실패(already_detected) → explore 복귀")
                     change_state_function("explore")
