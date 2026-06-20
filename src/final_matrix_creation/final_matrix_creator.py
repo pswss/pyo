@@ -332,7 +332,7 @@ class FinalMatrixCreator:
 
 
     def pixel_grid_to_final_grid(self, pixel_grid: CompoundExpandablePixelGrid, robot_start_position: np.ndarray,
-                                 area4_positions=None) -> np.ndarray:
+                                 area4_positions=None, reported_fixtures=None) -> np.ndarray:
         """
         픽셀 그리드 전체를 최종 텍스트 매트릭스로 변환합니다.
 
@@ -388,7 +388,42 @@ class FinalMatrixCreator:
         if area4_positions:
             self.__fill_area4(text_grid, pixel_grid, offsets, area4_positions)
 
+        # 보고한 토큰(victim H/S/U, hazmat F/P/C/O)을 사인이 붙은 벽 칸에 글자로 배치
+        if reported_fixtures:
+            self.__place_fixtures(text_grid, pixel_grid, offsets, reported_fixtures)
+
         return np.array(text_grid)
+
+    def __place_fixtures(self, text_grid: list, pixel_grid: CompoundExpandablePixelGrid,
+                         offsets: np.ndarray, reported_fixtures) -> None:
+        """보고한 토큰을 최종 행렬에 글자로 기록합니다(규정: victim=H/S/U, hazmat=F/P/C/O).
+        토큰 위치를 텍스트 격자 셀로 변환(area4와 동일 매핑) 후, 주변에서 가장 가까운
+        벽('1') 칸을 글자로 덮습니다(토큰은 벽에 붙어 있으므로). 벽을 못 찾으면 추정 칸에 기록."""
+        rows = len(text_grid)
+        cols = len(text_grid[0]) if text_grid else 0
+        placed = 0
+        for pos, letter in reported_fixtures:
+            if not letter:
+                continue
+            arr = pixel_grid.coordinates_to_array_index(np.array([pos.x, pos.y])) - offsets
+            half = arr // self.__square_size_px           # 반타일 인덱스
+            tr, tc = int(half[0]) * 2, int(half[1]) * 2   # 텍스트 격자 셀(타일 경계 = 벽 자리)
+            best, best_d = None, 1e9
+            for dr in range(-3, 4):
+                for dc in range(-3, 4):
+                    r, c = tr + dr, tc + dc
+                    if 0 <= r < rows and 0 <= c < cols and text_grid[r][c] == "1":
+                        d = dr * dr + dc * dc
+                        if d < best_d:
+                            best_d, best = d, (r, c)
+            if best is not None:
+                text_grid[best[0]][best[1]] = letter
+                placed += 1
+            elif 0 <= tr < rows and 0 <= tc < cols:
+                text_grid[tr][tc] = letter
+                placed += 1
+        if placed:
+            print(f"[최종맵:final_matrix_creator] 토큰 {placed}개 배치")
 
     def __fill_area4(self, text_grid: list, pixel_grid: CompoundExpandablePixelGrid,
                      offsets: np.ndarray, area4_positions) -> None:
