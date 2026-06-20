@@ -56,6 +56,12 @@ class WallMapper:
         # 이보다 작은 고립 부스러기(px 수)는 표시에서 제외 (증거 raw에는 남아서 더 확정되면 복귀)
         self.min_wall_fragment_px = 2  # 그리드서치 2026-06-06
 
+        # 선(line) 매핑: 각도순으로 인접한 라이다 점 사이 거리가 이 픽셀 이하이면 같은
+        # 벽면으로 보고 Bresenham 선분으로 이어 벽을 '선'으로 등록한다(점 누적 대신 연속 선).
+        # 초과하면(코너/레이어 경계/빈 각도) 점만 등록 → 빈 공간 가로지르는 가짜 벽선 방지.
+        # ⚠ 포즈 지터로 선이 매 프레임 다른 픽셀을 쓸어 벽이 번질 수 있음(시뮬 확인 필요).
+        self.wall_line_max_gap_px = round(0.05 * self.grid.resolution)  # ≈5cm. ★시뮬 튜닝
+
         # 로봇 크기 원형 마스크 (navigation_preference 생성에 사용)
         self.robot_diameter_template = np.zeros((self.robot_diameter, self.robot_diameter), dtype=np.uint8)
         self.robot_diameter_template = cv.circle(self.robot_diameter_template,
@@ -103,6 +109,7 @@ class WallMapper:
         - 노이즈 필터링
         - 통과 불가 영역 생성
         """
+        prev_grid_index = None
         for p in point_cloud:
             point = np.array(p, dtype=float) + robot_position
 
@@ -112,8 +119,22 @@ class WallMapper:
             robot_array_index = self.grid.coordinates_to_array_index(robot_position)
             point_array_index = self.grid.grid_index_to_array_index(point_grid_index)
 
-            self.occupy_point(point_array_index)                                      # 벽 카운터 증가
+            # 선 매핑: 직전 점과 가까우면(같은 벽면) 선분으로 이어 occupy → 벽을 선으로 등록.
+            # 멀면(코너/레이어 경계/빈 각도) 현재 점만 occupy → 빈 공간 가짜 벽선 방지.
+            # grid index로 거리 판정(확장에 안전), array index로 그림(현재 프레임 좌표).
+            if prev_grid_index is not None and max(
+                    abs(point_grid_index[0] - prev_grid_index[0]),
+                    abs(point_grid_index[1] - prev_grid_index[1])) <= self.wall_line_max_gap_px:
+                prev_array_index = self.grid.grid_index_to_array_index(prev_grid_index)
+                rr, cc = skimage.draw.line(int(prev_array_index[0]), int(prev_array_index[1]),
+                                           int(point_array_index[0]), int(point_array_index[1]))
+                for li, lj in zip(rr.tolist(), cc.tolist()):
+                    self.occupy_point((li, lj))                                       # 선분 위 셀 벽 카운터 증가
+            else:
+                self.occupy_point(point_array_index)                                  # 고립 점은 점으로
+
             self.mark_point_as_seen_by_lidar(robot_array_index, point_array_index)   # 빔 궤적 기록
+            prev_grid_index = point_grid_index
 
         self.filter_out_noise()            # 저빈도 포인트 제거
         self.generate_navigation_margins() # traversable + navigation_preference 계산
