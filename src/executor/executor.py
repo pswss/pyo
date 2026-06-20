@@ -42,8 +42,10 @@ class Executor:
 
         self.delay_manager = DelayManager()     # 시간 지연(Delay)을 비동기적으로 관리 (Webots 화면 멈춤 방지)
         self.stuck_detector = StuckDetector()   # 로봇이 벽에 끼어서 헛돌고 있는지 감지
-        self.consecutive_stuck_escapes = 0      # wiggle 탈출 연속 시도 횟수 (성공 시 0으로 리셋)
+        self.consecutive_stuck_escapes = 0      # 같은 자리 wiggle 탈출 연속 시도 횟수
         self.max_stuck_escapes = 3              # 이 횟수만큼 wiggle 실패하면 LoP 신고(순간이동)로 전환
+        self.__last_stuck_position = None        # 직전 끼임 위치 (같은 자리 반복 판정용)
+        self.stuck_same_spot_radius = 0.15       # 이 반경(m) 내 재끼임은 '같은 자리'로 간주. ★시뮬 튜닝
 
         # --- 2. 상태 머신 (State Machine) 설정 ---
         # 로봇이 현재 어떤 기분/상태인지 정의하고, 상태 간의 전환(Transition)을 관리합니다.
@@ -204,25 +206,30 @@ class Executor:
             return
 
         if self.stuck_detector.is_stuck():
-            self.consecutive_stuck_escapes += 1
-            # wiggle 반복 실패 → LoP 신고로 순간이동 (8분 내내 헛도는 것 방지)
+            # 연속 카운트는 '같은 자리' 기준. wiggle은 후진+제자리턴이라 거의 원위치로 복귀하므로
+            # '움직였으니 성공'식 리셋은 같은 막힌 목표로 재돌입하는 한계루프(앞→뒤→턴→원위치 반복)를
+            # 영영 못 끊는다(LoP까지 누적이 안 됨). 직전 끼임 위치 근처면 누적, 멀면 1로 새로 시작.
+            cur = self.robot.position
+            same_spot = (self.__last_stuck_position is not None
+                         and cur.get_distance_to(self.__last_stuck_position) <= self.stuck_same_spot_radius)
+            self.consecutive_stuck_escapes = self.consecutive_stuck_escapes + 1 if same_spot else 1
+            self.__last_stuck_position = Position2D(cur.x, cur.y)
+            # 같은 자리 wiggle 반복 실패 → LoP 신고로 순간이동 (한계루프/맵 갉아먹기 차단)
             if self.consecutive_stuck_escapes >= self.max_stuck_escapes:
-                print(f"[끼임 감지:executor.check_stuck] ⚠ wiggle {self.max_stuck_escapes}회 실패 → LoP 신고(순간이동) "
-                      f"(위치=({self.robot.position.x:.4f},{self.robot.position.y:.4f})m, 시뮬 시간={self.robot.time:.1f}s)")
+                print(f"[끼임 감지:executor.check_stuck] ⚠ 같은 자리 wiggle {self.max_stuck_escapes}회 실패 → LoP 신고(순간이동) "
+                      f"(위치=({cur.x:.4f},{cur.y:.4f})m, 시뮬 시간={self.robot.time:.1f}s)")
                 self.robot.comunicator.send_lack_of_progress()
                 self.consecutive_stuck_escapes = 0
+                self.__last_stuck_position = None
                 self.stuck_detector.reset()   # 순간이동 후 즉시 재트리거 방지 (창 이력 포함)
                 return
             # 1차: 물리적 wiggle 탈출 시도
             print(f"[끼임 감지:executor.check_stuck] ⚠ 끼임 카운터 임계 초과 → stuck 전환 "
-                  f"(시도 {self.consecutive_stuck_escapes}/{self.max_stuck_escapes}, "
-                  f"위치=({self.robot.position.x:.4f},{self.robot.position.y:.4f})m, 시뮬 시간={self.robot.time:.1f}s)")
+                  f"(같은자리 {self.consecutive_stuck_escapes}/{self.max_stuck_escapes}, "
+                  f"위치=({cur.x:.4f},{cur.y:.4f})m, 시뮬 시간={self.robot.time:.1f}s)")
             self.state_machine.change_state("stuck")
             self.sequencer.reset_sequence()
             self.stuck_detector.reset()   # wiggle 후 새 창으로 재평가 (즉시 재트리거 방지)
-        elif self.stuck_detector.stuck_counter == 0:
-            # 정상 이동 중 → 연속 끼임 카운터 리셋 (직전 wiggle이 성공한 것으로 판단)
-            self.consecutive_stuck_escapes = 0
 
     def check_swamp_proximity(self):
         """늪지대(Swamp)에 가까워졌는지 확인 (센서 오차 방지용).
