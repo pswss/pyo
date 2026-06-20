@@ -41,7 +41,9 @@ class WallMapper:
         # 더 큰 해악으로 확인됨. Erebus 맵은 정적이므로 처음 확정된 벽이 가장 정확하다.
         # 오탐 방어는 확정 임계(to_boolean_threshold)가 담당. 드리프트로 넓어진 띠는
         # 정제 단계(thin_walls)가 수렴시킨다. ★시뮬 튜닝
-        self.free_space_decrement = 0
+        # 재활성(1): 드리프트로 같은 벽이 평행하게 중복 누적되는 '중복 매핑'을 빔-통과 청소로
+        # 제거(사용자 보고). 위 트레이드오프(드리프트 심하면 진짜 벽 얇아짐) 감수. 과하면 0으로.
+        self.free_space_decrement = 1
 
         # 벽 정제 활성 여부 (0=비활성: walls_raw가 그대로 walls로 복사됨)
         self.wall_refine_enabled = 1
