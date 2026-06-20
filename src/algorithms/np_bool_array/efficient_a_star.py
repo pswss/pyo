@@ -35,14 +35,16 @@ class aStarAlgorithm:
     - best_cost_for_node_lookup 딕셔너리로 중복 노드 처리 최적화
     - closed set으로 이미 처리된 노드 재방문 방지
     - 4방향 이동 (상하좌우)
-    - preference_weight=2 (a_star.py의 50보다 낮아 선호도 영향 줄임)
+    - preference_weight=0.1 (soft 벽 회피만; 과회피/제자리 돎 방지, 충돌은 traversable가 담당)
     - search_limit 파라미터로 최대 탐색 루프 수 제한 가능
     - 옥탄 휴리스틱 사용: 대각선 거리 추정으로 더 정확한 h값 계산
     """
     def __init__(self):
         # 4방향 인접 이동 벡터 (대각선 제외)
         self.adjacents = [[0, 1], [0, -1], [-1, 0], [1, 0], ]#[1, 1], [1, -1], [-1, -1], [-1, 1]]
-        self.preference_weight = 2  # 벽 근처 경로 회피 패널티 가중치
+        self.preference_weight = 0.1  # 벽 회피 soft 패널티 가중치. 2일 땐 패널티(pref~88×2≈176)가
+        # 한 칸 이동비용(g=1)의 ~170배라 조금만 벽 가까워도 과회피/제자리 돎 → 0.1로 완화.
+        # 충돌 방지는 traversable(하드 마진)가 담당하므로 soft 선호도는 낮아도 안전. ★시뮬 튜닝
 
     @staticmethod
     def reconstructpath(node):
