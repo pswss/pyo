@@ -26,6 +26,7 @@ from executor.executor import Executor
 from executor.stuck_detector import StuckDetector
 from flow_control.state_machine import StateMachine
 from flow_control.sequencer import Sequencer
+from data_structures.vectors import Position2D
 
 
 def make_executor(initial_state):
@@ -39,13 +40,15 @@ def make_executor(initial_state):
     ex.sequencer = Sequencer(reset_function=lambda: None)
     ex.consecutive_stuck_escapes = 0
     ex.max_stuck_escapes = 3
+    ex.last_stuck_position = None
+    ex.stuck_same_spot_radius = 0.15
     # LoP 신고 호출을 기록하는 가짜 comunicator
     lop = types.SimpleNamespace(calls=0)
     def _send_lop():
         lop.calls += 1
-    # check_stuck의 로그/통신이 참조하는 robot 협력자
+    # check_stuck의 로그/통신이 참조하는 robot 협력자 (position은 거리계산 위해 실제 Position2D)
     ex.robot = types.SimpleNamespace(
-        position=types.SimpleNamespace(x=0.0, y=0.0), time=0.0,
+        position=Position2D(0.0, 0.0), time=0.0,
         comunicator=types.SimpleNamespace(send_lack_of_progress=_send_lop))
     ex._lop = lop  # 테스트 접근용
     return ex
@@ -97,17 +100,34 @@ def test_lop_request_after_repeated_wiggle_failures():
     assert ex.consecutive_stuck_escapes == 0, "LoP 신고 후 카운터 리셋돼야 함"
 
 
-def test_progress_resets_escape_counter():
-    # wiggle 1회 시도 후 정상 이동하면(끼임 해소) 연속 카운터가 리셋되어야 함
+def test_far_stuck_starts_fresh_count():
+    # 한 곳에서 끼였다 나온 뒤 '멀리 떨어진' 새 위치에서 끼이면 연속 카운트는 1로 새로
+    # 시작해야 한다(서로 다른 deadlock이 합산돼 조기 LoP 되는 것 방지). wiggle은 거의
+    # 원위치라 '이동했으니 리셋'은 같은 자리 한계루프를 못 끊으므로, 리셋 기준은 '거리'다.
     ex = make_executor("explore")
     ex.stuck_detector.stuck_counter = 100
-    ex.check_stuck()                       # consecutive 1 → stuck 전환
+    ex.check_stuck()                       # A(0,0)에서 끼임 → consecutive 1, stuck
     assert ex.consecutive_stuck_escapes == 1
     ex.state_machine.state = "explore"     # 복귀
-    ex.stuck_detector.stuck_counter = 0    # 정상 이동(끼임 해소)
+    ex.robot.position = Position2D(1.0, 1.0)  # 멀리 이동 (반경 0.15m 초과)
+    ex.stuck_detector.stuck_counter = 100  # 새 위치 B에서 끼임
     ex.check_stuck()
-    assert ex.consecutive_stuck_escapes == 0, "정상 이동 시 연속 끼임 카운터 리셋돼야 함"
-    assert ex._lop.calls == 0, "정상 회복 시 LoP 신고 없어야 함"
+    assert ex.consecutive_stuck_escapes == 1, "멀리서 새로 끼이면 카운트 1로 시작해야 함"
+    assert ex._lop.calls == 0, "서로 다른 위치 끼임은 합산되지 않아 LoP 없어야 함"
+
+
+def test_same_spot_repeats_escalate_to_lop():
+    # 같은 자리에서 wiggle이 계속 실패(원위치 복귀 반복)하면 3회째 LoP로 탈출
+    ex = make_executor("explore")
+    for _ in (1, 2):
+        ex.stuck_detector.stuck_counter = 100
+        ex.check_stuck()
+        assert ex.state_machine.state == "stuck"
+        assert ex._lop.calls == 0
+        ex.state_machine.state = "explore"   # 같은 위치(0,0) 유지 → 같은 자리 재끼임
+    ex.stuck_detector.stuck_counter = 100
+    ex.check_stuck()
+    assert ex._lop.calls == 1, "같은 자리 3회 실패 → LoP 신고"
 
 
 if __name__ == "__main__":
@@ -115,5 +135,6 @@ if __name__ == "__main__":
     test_no_transition_when_not_stuck()
     test_ignored_outside_explore()
     test_lop_request_after_repeated_wiggle_failures()
-    test_progress_resets_escape_counter()
+    test_far_stuck_starts_fresh_count()
+    test_same_spot_repeats_escalate_to_lop()
     print("ALL PASS")

@@ -44,7 +44,7 @@ class Executor:
         self.stuck_detector = StuckDetector()   # 로봇이 벽에 끼어서 헛돌고 있는지 감지
         self.consecutive_stuck_escapes = 0      # 같은 자리 wiggle 탈출 연속 시도 횟수
         self.max_stuck_escapes = 3              # 이 횟수만큼 wiggle 실패하면 LoP 신고(순간이동)로 전환
-        self.__last_stuck_position = None        # 직전 끼임 위치 (같은 자리 반복 판정용)
+        self.last_stuck_position = None        # 직전 끼임 위치 (같은 자리 반복 판정용)
         self.stuck_same_spot_radius = 0.15       # 이 반경(m) 내 재끼임은 '같은 자리'로 간주. ★시뮬 튜닝
 
         # --- 2. 상태 머신 (State Machine) 설정 ---
@@ -210,17 +210,17 @@ class Executor:
             # '움직였으니 성공'식 리셋은 같은 막힌 목표로 재돌입하는 한계루프(앞→뒤→턴→원위치 반복)를
             # 영영 못 끊는다(LoP까지 누적이 안 됨). 직전 끼임 위치 근처면 누적, 멀면 1로 새로 시작.
             cur = self.robot.position
-            same_spot = (self.__last_stuck_position is not None
-                         and cur.get_distance_to(self.__last_stuck_position) <= self.stuck_same_spot_radius)
+            same_spot = (self.last_stuck_position is not None
+                         and cur.get_distance_to(self.last_stuck_position) <= self.stuck_same_spot_radius)
             self.consecutive_stuck_escapes = self.consecutive_stuck_escapes + 1 if same_spot else 1
-            self.__last_stuck_position = Position2D(cur.x, cur.y)
+            self.last_stuck_position = Position2D(cur.x, cur.y)
             # 같은 자리 wiggle 반복 실패 → LoP 신고로 순간이동 (한계루프/맵 갉아먹기 차단)
             if self.consecutive_stuck_escapes >= self.max_stuck_escapes:
                 print(f"[끼임 감지:executor.check_stuck] ⚠ 같은 자리 wiggle {self.max_stuck_escapes}회 실패 → LoP 신고(순간이동) "
                       f"(위치=({cur.x:.4f},{cur.y:.4f})m, 시뮬 시간={self.robot.time:.1f}s)")
                 self.robot.comunicator.send_lack_of_progress()
                 self.consecutive_stuck_escapes = 0
-                self.__last_stuck_position = None
+                self.last_stuck_position = None
                 self.stuck_detector.reset()   # 순간이동 후 즉시 재트리거 방지 (창 이력 포함)
                 return
             # 1차: 물리적 wiggle 탈출 시도
