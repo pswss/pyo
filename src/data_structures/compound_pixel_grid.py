@@ -41,8 +41,11 @@ class CompoundExpandablePixelGrid:
 
         # 모든 정보 레이어를 하나의 딕셔너리로 관리
         self.arrays = {
-            "detected_points":              np.zeros(self.array_shape, np.uint8),
+            "detected_points":              np.zeros(self.array_shape, np.uint16),
             "walls":                        np.zeros(self.array_shape, np.bool_),
+            # 벽 원시 증거(raw): occupy_point가 여기에만 누적. "walls"는 매 프레임
+            # walls_raw에서 새로 계산되는 정제본(피드백 없음 → 누적 변형 방지).
+            "walls_raw":                    np.zeros(self.array_shape, np.bool_),
             "occupied":                     np.zeros(self.array_shape, np.bool_),
             "traversable":                  np.zeros(self.array_shape, np.bool_),
             "navigation_preference":        np.zeros(self.array_shape, np.float32),
@@ -66,6 +69,7 @@ class CompoundExpandablePixelGrid:
             "fixture_distance_margin":      np.zeros(self.array_shape, np.bool_),
             "robot_detected_fixture_from":  np.zeros(self.array_shape, np.bool_),
             "robot_center_traversed":       np.zeros(self.array_shape, np.bool_),
+            "hazmats":                      np.zeros(self.array_shape, np.bool_),
         }
 
     @property
@@ -184,13 +188,17 @@ class CompoundExpandablePixelGrid:
         디버그용 컬러 이미지를 생성합니다.
         - 파란색: 조난자 도달 가능 마진 영역
         - 흰색(어둡게): 벽/장애물 영역
-        - 초록색: 조난자 위치
+        - 초록색: 조난자(victim) 위치
+        - 빨간색: 위험물질(hazmat) 위치
+        - 노란색: 보고 완료된 fixture
         """
         color_grid = np.zeros((self.array_shape[0], self.array_shape[1], 3), dtype=np.float32)
 
         color_grid[self.arrays["fixture_distance_margin"]] = (0, 0, 1)
         color_grid[self.arrays["occupied"]] = (1, 1, 1)
-        color_grid *= 0.3  # 전체 밝기 감소
-        color_grid[self.arrays["victims"]] = (0, 1, 0)  # 조난자만 밝게
+        color_grid *= 0.3
+        color_grid[self.arrays["victims"]] = (0, 1, 0)
+        color_grid[self.arrays["hazmats"]] = (1, 0, 0)
+        color_grid[self.arrays["fixture_detection"]] = (0, 1, 1)
 
         return color_grid

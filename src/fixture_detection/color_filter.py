@@ -28,3 +28,22 @@ class ColorFilter:
         # HSV 범위 내 픽셀만 255로 표시하는 마스크 생성
         mask = cv.inRange(hsv_image, self.lower, self.upper)
         return mask
+
+
+WALL_COLOR_FILTER = ColorFilter((90, 44, 0), (95, 213, 158))
+
+
+def get_wall_mask(image: np.ndarray) -> np.ndarray:
+    """벽 색상 영역을 채워진 마스크로 반환합니다."""
+    margin = 1
+    raw_wall = WALL_COLOR_FILTER.filter(image)
+    wall = np.ones(shape=(raw_wall.shape[0], raw_wall.shape[1] + margin * 2), dtype=np.uint8) * 255
+    wall[:, margin:-margin] = raw_wall
+    conts, _ = cv.findContours(wall, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+    filled_wall = np.zeros_like(wall, dtype=np.bool_)
+    for c in conts:
+        this_cont = np.zeros_like(wall, dtype=np.uint8)
+        cv.fillPoly(this_cont, [c,], 255)
+        filled_wall += this_cont > 0
+    filled_wall = filled_wall[:, margin:-margin]
+    return filled_wall

@@ -31,8 +31,8 @@ class ArrayFilterer:
                                                      [1, 0, 1],
                                                      [0, 1, 0]])
 
-        # 100 스텝마다 한 번씩만 실행 (성능 최적화)
-        self.isolated_point_step_counter = StepCounter(100)
+        # 20 스텝마다 한 번씩 실행 (통로 근처 오탐 벽을 빠르게 제거)
+        self.isolated_point_step_counter = StepCounter(20)
         self.jagged_edge_step_counter = StepCounter(100)
 
     def remove_isolated_points(self, pixel_grid) -> np.ndarray:

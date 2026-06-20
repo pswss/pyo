@@ -88,7 +88,9 @@ class Comunicator(Sensor):
             if self.receiver.getQueueLength() > 0:
                 received_data = self.receiver.getBytes()
                 if len(received_data) > 2:
-                    tup = struct.unpack('c f i', received_data)
+                    # v26: 게임매니저가 'c f i i'로 전송(점수, 게임시간, 실제시간).
+                    # 'c f i'로 언팩하면 버퍼 크기 불일치로 struct.error 발생 → 점수/시간 갱신 불가.
+                    tup = struct.unpack('c f i i', received_data)
                     if tup[0].decode("utf-8") == 'G':
                         self.game_score = tup[1]
                         self.remaining_time = tup[2]

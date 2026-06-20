@@ -23,11 +23,13 @@ from utilities import ColorFilterTuner
 from fixture_detection.color_filter import ColorFilter
 from fixture_detection.non_fixture_filterer import NonFixtureFilter
 
-from flags import SHOW_DEBUG, DO_SLOW_DOWN, SLOW_DOWN_S, DO_SAVE_FIXTURE_DEBUG, SAVE_FIXTURE_DEBUG_DIR, TUNE_FILTER
+from flags import DO_SLOW_DOWN, SLOW_DOWN_S, TUNE_FILTER
 
+import math
 import time
 import numpy as np
 import cv2 as cv
+import skimage
 
 class Executor:
     """로봇의 모든 모듈(센서, 모터, 매핑, 길찾기)을 조율하고 전체 미션의 흐름을 제어하는 총괄 클래스입니다."""
@@ -40,13 +42,17 @@ class Executor:
 
         self.delay_manager = DelayManager()     # 시간 지연(Delay)을 비동기적으로 관리 (Webots 화면 멈춤 방지)
         self.stuck_detector = StuckDetector()   # 로봇이 벽에 끼어서 헛돌고 있는지 감지
+        self.consecutive_stuck_escapes = 0      # wiggle 탈출 연속 시도 횟수 (성공 시 0으로 리셋)
+        self.max_stuck_escapes = 3              # 이 횟수만큼 wiggle 실패하면 LoP 신고(순간이동)로 전환
 
         # --- 2. 상태 머신 (State Machine) 설정 ---
         # 로봇이 현재 어떤 기분/상태인지 정의하고, 상태 간의 전환(Transition)을 관리합니다.
         self.state_machine = StateMachine("init") 
         # create_state("상태이름", 실행할함수, {이동가능한다음상태들})
         self.state_machine.create_state("init", self.state_init, {"explore",}) 
-        self.state_machine.create_state("explore", self.state_explore, {"end", "report_fixture", "send_map", "stuck"}) 
+        self.state_machine.create_state("explore", self.state_explore, {"end", "report_fixture", "send_map", "stuck", "recalibrate", "avoid_hole"})
+        self.state_machine.create_state("recalibrate", self.state_recalibrate, {"explore", "send_map"})
+        self.state_machine.create_state("avoid_hole", self.state_avoid_hole, {"explore", "send_map"})
         self.state_machine.create_state("end", self.state_end)
         self.state_machine.create_state("report_fixture", self.state_report_fixture, {"explore", "send_map"})
         self.state_machine.create_state("send_map", self.state_send_map, {"explore", "end"})
@@ -86,7 +92,34 @@ class Executor:
 
         self.mini_calibrate_step_counter = StepCounter(20) # 20스텝마다 한 번씩 캘리브레이션 트리거
 
+        # 회전 중 라이다 맵핑 게이트 임계(스텝당 회전량). 직진 <1°/스텝, 제자리 회전 ~4.5°/스텝.
+        # 회전 중에는 heading이 스텝 경계 값이라 라이다 끝점이 호 모양으로 번짐
+        # (오프라인 재현: 회전 스캔 포함 시 벽 픽셀 +53%, precision 1.0→0.82). ★시뮬 튜닝
+        self.max_mapping_angular_velocity = Angle(2, Angle.DEGREES)
+
+        # 능동 heading 재캘리브레이션 주기(시뮬 초). passive GPS 보정은 목표 노드가 1~3cm
+        # 앞이라 직진 구간이 ≤4cm로 짧아 baseline(8cm) 영영 미달 → 4600프레임 보정 0회
+        # (실런 계측 확인). explore 중 이 주기마다 멈추고 초기 캘리브와 동일한 짧은
+        # 후진/전진 기동으로 자이로를 GPS heading에 재동기화한다. 후진 우선이라 안전
+        # (직전에 지나온 길 = 구멍 없음 보장). ★시뮬 튜닝
+        self.heading_recalib_interval = 20.0
+        self.__last_recalib_time = None
+
+        self.__avoid_hole_target = Angle(0)   # 구멍 회피 180° 회전 목표 (기동 진입 시 갱신)
+        self.__swamp_clear_frames = 0         # 늪 비근접 연속 프레임 (센서 복귀 디바운스)
+
         self.color_filter_tuner = ColorFilterTuner(ColorFilter((0, 0, 29), (0, 0, 137)), TUNE_FILTER)
+
+    def should_recalibrate_heading(self, now) -> bool:
+        """재캘리브레이션 주기 도래 여부. 첫 호출은 타이머 시작점만 등록하고 False."""
+        if self.__last_recalib_time is None:
+            self.__last_recalib_time = now
+            return False
+        return now - self.__last_recalib_time >= self.heading_recalib_interval
+
+    def mark_heading_recalibrated(self, now):
+        """재캘리브레이션 완료 시각 기록 → 타이머 리셋."""
+        self.__last_recalib_time = now
 
 
     def run(self):
@@ -101,9 +134,14 @@ class Executor:
 
             # 2. 유틸리티 업데이트 (지연시간, 끼임 감지)
             self.delay_manager.update(self.robot.time)
-            self.stuck_detector.update(self.robot.position,
-                                       self.robot.previous_position,
-                                       self.robot.drive_base.get_wheel_average_angular_velocity())
+            # 끼임 감지는 explore에서만 누적. 의도된 정지 상태(보고/재캘리브/wiggle 등)의
+            # 이력이 explore 복귀 직후 창 기반 감지를 오발시키지 않도록 그 외 상태에선 리셋.
+            if self.state_machine.check_state("explore"):
+                self.stuck_detector.update(self.robot.position,
+                                           self.robot.previous_position,
+                                           self.robot.drive_base.get_wheel_average_angular_velocity())
+            else:
+                self.stuck_detector.reset()
             
             # 카메라 색상 필터 튜닝
             self.color_filter_tuner.tune(self.robot.center_camera.image.image)
@@ -113,6 +151,14 @@ class Executor:
             
             # 4. 종료 시간 임박 시 지도 전송 체크
             self.check_map_sending()
+
+            # 4-1. 끼임(LoP) 감지 시 탈출 상태로 전환
+            self.check_stuck()
+
+            # 4-2. 늪 근처면 방향 센서를 자이로로 전환 (GPS 노이즈 회피).
+            #      init 캘리브레이션의 수동 센서 제어와 충돌하지 않도록 탐색 중에만 검사.
+            if self.state_machine.check_state("explore"):
+                self.check_swamp_proximity()
 
             # 5. ★ 로봇의 핵심 두뇌 (상태 머신) 실행 ★
             # 현재 상태에 맞춰 state_init, state_explore 등의 함수 중 하나를 실행합니다.
@@ -125,7 +171,12 @@ class Executor:
     def do_mapping(self):
         """맵핑 기능이 켜져 있을 때(True) 지도를 업데이트합니다."""
         if self.mapping_enabled:
-                if not self.robot.is_shaky(): # 로봇이 크게 흔들리지 않을 때 (정밀도 유지)
+                # 회전 중 라이다 제외: 제자리 회전 중 끝점이 호로 번져 벽 쓰레기를 영구
+                # 누적시킴(클리어링 OFF라 자가수정 없음). 직진 증거만으로 커버리지 충분
+                # (하니스 recall 1.0). init의 의도적 360° 스캔은 게이트하지 않음.
+                rotating = (not self.state_machine.check_state("init")) and \
+                           self.robot.gyroscope.get_angular_velocity() > self.max_mapping_angular_velocity
+                if not self.robot.is_shaky() and not rotating: # 흔들림/회전 없을 때 (정밀도 유지)
                     # 라이다와 카메라를 모두 사용하여 지도 업데이트
                     self.mapper.update(self.robot.get_point_cloud(), 
                                     self.robot.get_out_of_bounds_point_cloud(),
@@ -141,13 +192,49 @@ class Executor:
                                        robot_orientation=self.robot.orientation,
                                        time=self.robot.time)
 
+    def check_stuck(self):
+        """로봇이 벽에 끼였으면 탈출을 시도합니다. ('stuck'은 'explore'에서만 진입 가능)
+
+        1차: 'stuck' 상태(물리적 wiggle 탈출)로 전환해 스스로 빠져나옴(무패널티).
+        2차: wiggle을 max_stuck_escapes회 반복해도 못 빠져나오면 게임매니저에 LoP를
+             신고(send_lack_of_progress)하여 마지막 지점으로 순간이동시킨다(최후 수단, 패널티 감수).
+        """
+        if not self.state_machine.check_state("explore"):
+            return
+
+        if self.stuck_detector.is_stuck():
+            self.consecutive_stuck_escapes += 1
+            # wiggle 반복 실패 → LoP 신고로 순간이동 (8분 내내 헛도는 것 방지)
+            if self.consecutive_stuck_escapes >= self.max_stuck_escapes:
+                print(f"[끼임 감지:executor.check_stuck] ⚠ wiggle {self.max_stuck_escapes}회 실패 → LoP 신고(순간이동) "
+                      f"(위치=({self.robot.position.x:.4f},{self.robot.position.y:.4f})m, 시뮬 시간={self.robot.time:.1f}s)")
+                self.robot.comunicator.send_lack_of_progress()
+                self.consecutive_stuck_escapes = 0
+                self.stuck_detector.reset()   # 순간이동 후 즉시 재트리거 방지 (창 이력 포함)
+                return
+            # 1차: 물리적 wiggle 탈출 시도
+            print(f"[끼임 감지:executor.check_stuck] ⚠ 끼임 카운터 임계 초과 → stuck 전환 "
+                  f"(시도 {self.consecutive_stuck_escapes}/{self.max_stuck_escapes}, "
+                  f"위치=({self.robot.position.x:.4f},{self.robot.position.y:.4f})m, 시뮬 시간={self.robot.time:.1f}s)")
+            self.state_machine.change_state("stuck")
+            self.sequencer.reset_sequence()
+            self.stuck_detector.reset()   # wiggle 후 새 창으로 재평가 (즉시 재트리거 방지)
+        elif self.stuck_detector.stuck_counter == 0:
+            # 정상 이동 중 → 연속 끼임 카운터 리셋 (직전 wiggle이 성공한 것으로 판단)
+            self.consecutive_stuck_escapes = 0
+
     def check_swamp_proximity(self):
-        """늪지대(Swamp)에 가까워졌는지 확인 (센서 오차 방지용)"""
+        """늪지대(Swamp)에 가까워졌는지 확인 (센서 오차 방지용).
+        복귀는 연속 30프레임 비근접일 때만 — 경계 2cm에서 매 프레임 토글되면
+        센서 모드 채터링으로 heading이 출렁여 늪 경계 왕복 진동을 유발. ★시뮬 튜닝"""
         if self.mapper.is_close_to_swamp():
+            self.__swamp_clear_frames = 0
             self.robot.auto_decide_orientation_sensor = False
             self.robot.orientation_sensor = self.robot.GYROSCOPE # 늪지대에서는 GPS 에러가 커지므로 자이로만 사용
-        else: 
-            self.robot.auto_decide_orientation_sensor = True
+        elif not self.robot.auto_decide_orientation_sensor:
+            self.__swamp_clear_frames += 1
+            if self.__swamp_clear_frames >= 30:
+                self.robot.auto_decide_orientation_sensor = True
 
     def _tick_real_elapsed(self):
         """robot.step()이 반환된 직후 호출: 일시정지 구간을 제외한 실제 실행 시간을 누적합니다."""
@@ -166,7 +253,9 @@ class Executor:
         sim_elapsed  = self.mapper.time
         real_elapsed = self.__real_elapsed
         elapsed = max(sim_elapsed, real_elapsed)
-        if elapsed > self.max_time_in_run - 2 and not self.map_sent:
+        # 마진 10초: Erebus는 맵을 '1회만' 채점하므로 게임 종료 전 제출 보장이 최우선.
+        # 2초 마진은 무거운 프레임/시계 오차로 게임이 먼저 끝나 미제출되는 사례 발생. ★시뮬 튜닝
+        if elapsed > self.max_time_in_run - 10 and not self.map_sent:
             print(f"[타임아웃:executor.check_map_sending] ⚠ 제한 시간 임박! 강제 지도 전송 트리거 "
                   f"(시뮬={sim_elapsed:.1f}s / 리얼={real_elapsed:.1f}s / 한계={self.max_time_in_run}s)")
             self.state_machine.change_state("send_map")
@@ -208,15 +297,35 @@ class Executor:
 
     def state_explore(self, change_state_function):
         """[탐색 상태] 실제 미로를 돌아다니며 길을 찾고 미션을 수행하는 메인 모드입니다."""
-        self.sequencer.start_sequence() 
+        # 주기 도래 시 능동 heading 재캘리브레이션 (자이로 드리프트 → 맵 휘어짐 방지)
+        if self.should_recalibrate_heading(self.robot.time):
+            change_state_function("recalibrate")
+            self.sequencer.reset_sequence()
+            return
+
+        # 전방 구멍(블랙홀) 감지 시: 웨이포인트가 구멍과 '겹칠 때만' 후진+180° 기동.
+        # 안 겹치면 경로계획(occupied 우회)에 맡김 — 무조건 180°는 멀쩡한 웨이포인트도 버림.
+        if self.mapper.is_hole_in_front(self.robot.position, self.robot.orientation):
+            target = self.agent.get_target_position()
+            if target is None or self.mapper.is_hole_between(self.robot.position, target):
+                print(f"[구멍회피:executor.state_explore] ⚠ 전방 구멍이 웨이포인트와 겹침 → 회피 기동 "
+                      f"(위치=({self.robot.position.x:.3f},{self.robot.position.y:.3f})m)")
+                change_state_function("avoid_hole")
+                self.sequencer.reset_sequence()
+                return
+
+        self.sequencer.start_sequence()
+
+        self.robot.lidar.front_guard_enabled = True   # 탐색 중엔 충돌 가드 ON (보고 후 복원)
 
         if self.sequencer.simple_event():
             self.mapping_enabled = True
 
         # --- 1. 길 찾기 ---
         # Agent에게 목표 위치를 다시 계산하도록 업데이트
-        self.agent.update() 
-        self.mini_calibrate()
+        self.agent.update()
+        # mini_calibrate 호출 제거: 20스텝마다 강제 0.1s 정지·풀스피드 펄스가 주기적
+        # 움찔(이동 끊김)의 원인이었음. 자세 교정은 recalibrate 상태가 담당.
         
         # Agent가 계산해준 다음 좌표(목표)를 향해 로봇 이동!
         self.seq_move_to_coords(self.agent.get_target_position())
@@ -259,6 +368,48 @@ class Executor:
                     break
                 
 
+    def state_avoid_hole(self, change_state_function):
+        """[구멍 회피] 전방 블랙홀 감지 시: 정지 → 후진(~4cm) → 180° 회전 → explore 복귀.
+        경로계획은 occupied로 구멍을 우회하지만, 코앞 근접 시 명시적 탈출 동작이 없어
+        정지/진동하던 것을 능동 기동으로 대체."""
+        self.sequencer.start_sequence()
+
+        self.seq_move_wheels(-0.6, -0.6)
+        self.seq_delay_seconds(0.5)
+        self.seq_move_wheels(0, 0)
+
+        if self.sequencer.simple_event():
+            # 후진 완료 시점의 현재 방향 기준 180° 반대편으로
+            self.__avoid_hole_target = Angle(self.robot.orientation.radians + math.pi)
+            self.__avoid_hole_target.normalize()
+
+        self.seq_rotate_to_angle(self.__avoid_hole_target)
+
+        if self.sequencer.simple_event():
+            print(f"[구멍회피:executor.state_avoid_hole] ✓ 후진+180° 완료 → explore 복귀")
+            change_state_function("explore")
+        self.sequencer.seq_reset_sequence()
+
+    def state_recalibrate(self, change_state_function):
+        """[주기 재캘리브레이션] 정지 → 짧은 후진/전진 기동으로 자이로를 GPS heading에
+        재동기화. 기동 자체는 초기 캘리브(seq_calibrate_robot_rotation) 재사용."""
+        self.sequencer.start_sequence()
+
+        if self.sequencer.simple_event():
+            print(f"[재캘리브:executor.state_recalibrate] ▶ heading 재동기화 시작 (시뮬 {self.robot.time:.1f}s)")
+            self.mapping_enabled = False   # 기동 중 라이다 맵 오염 방지
+
+        self.seq_move_wheels(0, 0)
+        self.seq_delay_seconds(0.2)        # 완전 정지 후 측정 (관성 배제)
+        self.seq_calibrate_robot_rotation()
+
+        if self.sequencer.simple_event():
+            self.mark_heading_recalibrated(self.robot.time)
+            self.mapping_enabled = True
+            print(f"[재캘리브:executor.state_recalibrate] ✓ 완료 → explore 복귀 (시뮬 {self.robot.time:.1f}s)")
+            change_state_function("explore")
+        self.sequencer.seq_reset_sequence()
+
     def mini_calibrate(self):
         """가끔씩 로봇이 미세하게 멈추며 자세를 교정하는 함수"""
         if self.mini_calibrate_step_counter.check():
@@ -285,8 +436,13 @@ class Executor:
         # Y축 오차가 크면 앞뒤로 이동
         if abs(diff.y) > 4:
             vel = diff.y * 0.1
-            self.robot.move_wheels(vel, vel)
-            return False # 아직 정렬 안 끝남
+            # 전방 벽이 가까우면 전진(vel>0) 금지 — 감지 후 벽으로 들이대 박는 것 방지.
+            # 이미 감지·분류된 상태라 더 다가갈 필요 없음. 후진(vel<0)은 허용(거리 확보).
+            if vel > 0 and self.robot.lidar.front_blocked:
+                pass  # 전진 생략, 수직 정렬은 현 위치로 타협
+            else:
+                self.robot.move_wheels(vel, vel)
+                return False # 아직 정렬 안 끝남
 
         # X축 오차가 크면 제자리 회전
         if abs(diff.x) > 6:
@@ -300,13 +456,15 @@ class Executor:
 
     def state_end(self, change_state_function):
         """[미션 완료 상태] 완성된 지도를 추출하고 통신으로 본부에 보낸 후 끝냅니다."""
-        final_matrix = self.final_matrix_creator.pixel_grid_to_final_grid(self.mapper.pixel_grid, self.mapper.start_position)
+        final_matrix = self.final_matrix_creator.pixel_grid_to_final_grid(self.mapper.pixel_grid, self.mapper.start_position,
+            area4_positions=self.mapper.area_tracker.area4_positions)
         self.robot.comunicator.send_map(final_matrix)
         self.robot.comunicator.send_end_of_play()
 
     def state_send_map(self, change_state_function):
         """[지도 강제 전송 상태] 시간이 다 되었을 때 지도를 보내고 다시 탐색으로 돌아갑니다."""
-        final_matrix = self.final_matrix_creator.pixel_grid_to_final_grid(self.mapper.pixel_grid, self.mapper.start_position)
+        final_matrix = self.final_matrix_creator.pixel_grid_to_final_grid(self.mapper.pixel_grid, self.mapper.start_position,
+            area4_positions=self.mapper.area_tracker.area4_positions)
         self.robot.comunicator.send_map(final_matrix)
         self.map_sent = True
         change_state_function("explore")
@@ -322,6 +480,7 @@ class Executor:
             if self.sequencer.simple_event():
                 print(f"[조난자 보고:executor.state_report_fixture] ▶ 보고 시퀀스 시작: 글자='{self.letter_to_report}', 방향={self.report_orientation.degrees:.1f}°")
                 self.mapping_enabled = False
+                self.robot.lidar.front_guard_enabled = False   # 의도적 벽 접근 — 전진 차단 해제
 
             # 조난자가 있는 방향으로 정확히 회전
             if self.sequencer.simple_event():
@@ -357,8 +516,10 @@ class Executor:
                     self.mapping_enabled = True
                     return
 
-            # 조난자를 향해 앞으로 살짝 다가감 (0.6 속도로 0.1초 전진)
-            self.seq_move_wheels(0.6, 0.6)
+            # 조난자를 향해 앞으로 살짝 다가감 (0.6 속도로 0.1초 전진).
+            # 단, 전방 벽이 이미 가까우면 더 들이대지 않는다(촬영 거리 유지, 벽 박음 방지).
+            nudge_v = 0.0 if self.robot.lidar.front_blocked else 0.6
+            self.seq_move_wheels(nudge_v, nudge_v)
             self.seq_delay_seconds(0.1)
             self.seq_move_wheels(0, 0)
             self.seq_delay_seconds(1.5) # 확실한 사진/보고를 위해 1.5초 대기
@@ -367,6 +528,12 @@ class Executor:
             if self.sequencer.simple_event():
                 print(f"[조난자 보고:executor.state_report_fixture] 글자='{self.letter_to_report}', 위치=({self.robot.raw_position.x:.4f}, {self.robot.raw_position.y:.4f})m, 시뮬 시간={self.robot.time:.1f}s")
                 self.robot.comunicator.send_victim(self.robot.raw_position, self.letter_to_report)
+                if self.letter_to_report in ('F', 'P', 'C', 'O'):
+                    idx = self.mapper.pixel_grid.coordinates_to_array_index(self.robot.position)
+                    rr, cc = skimage.draw.disk(idx, 4)
+                    shape = self.mapper.pixel_grid.array_shape
+                    valid = (rr >= 0) & (cc >= 0) & (rr < shape[0]) & (cc < shape[1])
+                    self.mapper.pixel_grid.arrays["hazmats"][rr[valid], cc[valid]] = True
         
             self.seq_delay_seconds(0.1)
         
@@ -411,34 +578,58 @@ class Executor:
         self.robot.position_offsets = self.robot.position % (self.mapper.quarter_tile_size * 2)
         
     def seq_calibrate_robot_rotation(self):
-        """[초기 캘리브레이션] GPS값을 이용해 자이로스코프 각도의 영점을 정확히 맞추는 시퀀스"""
+        """[초기 캘리브레이션] 열린 방향으로 이동해 GPS heading을 측정하고 자이로 영점을 맞춘다.
+
+        로봇은 시작 타일의 '열린 쪽'을 향해 스폰되므로(MainSupervisor), 시작 방향이
+        월드마다 다르다. 한 번의 측정이 전체 런 heading 기준으로 고정되므로 여기서
+        틀어지면 맵 전체가 그 각도만큼 회전한다(예: world1/4는 동쪽을 보고 시작 → 미보정 시 90° 회전).
+
+        전략:
+        1) 우선 후진으로 측정(+π). 전방 블랙홀 회피용. world3류(뒤가 열림)는 여기서 성공.
+        2) 후진이 벽에 막혀 실패하면(world1/4류: 뒤가 벽, 앞이 열린 입구), 복귀용 전진 이동을
+           그대로 heading 측정에 활용(+0). 즉 '열린 방향'으로 이동해 측정 → 시작 방향 무관하게 보정.
+        3) 앞뒤 모두 실패하면 경고(자이로 영점 미설정 → 매핑 회전 위험).
+        GPS 노이즈에 강건한 centroid 평균(get_orientation_robust)을 우선 사용한다."""
         if self.sequencer.simple_event():
             self.robot.auto_decide_orientation_sensor = False
-        
-        # 뒤로 조금 갔다가
+            self.__calibrated_heading = False
+
+        # GPS baseline 초기화 → 후진 구간만으로 방향 계산
+        self.sequencer.simple_event(self.robot.gps.reset_orientation_baseline)
+
+        # 1차: 후진 0.4s (~5cm) — 전방 블랙홀 반대 방향
         self.seq_move_wheels(-1, -1)
-        self.seq_delay_seconds(0.1)
-        
-        # GPS 센서를 기준으로 삼고
-        if self.sequencer.simple_event(): 
-            self.robot.orientation_sensor = self.robot.GPS
-            
-        # 다시 앞으로 가서 방향벡터를 얻은 후
-        self.seq_move_wheels(1, 1)
-        self.seq_delay_seconds(0.1)
-        
-        # 자이로스코프로 교체 (이후로는 자이로로 방향 계산)
-        if self.sequencer.simple_event(): 
-            self.robot.orientation_sensor = self.robot.GYROSCOPE
-            
-        self.seq_delay_seconds(0.1)
-        self.seq_move_wheels(0, 0)
-        self.seq_move_wheels(-1, -1)
-        self.seq_delay_seconds(0.1)
+        self.seq_delay_seconds(0.4)
         self.seq_move_wheels(0, 0)
         if self.sequencer.simple_event():
+            self.__calibrate_heading_from_gps(reverse=True)   # 후진 방향 +π → 전방
+
+        # 2차 겸 복귀: 전진 0.4s. world3류는 단순 중앙 복귀(전방 구멍으로 가지 않음 — 후진한 만큼만 복귀).
+        # world1/4류는 후진이 막혀 제자리였으므로 이 전진이 '열린 입구'로의 이동이 되어 heading 취득에 쓰인다.
+        self.sequencer.simple_event(self.robot.gps.reset_orientation_baseline)
+        self.seq_move_wheels(1, 1)
+        self.seq_delay_seconds(0.4)
+        self.seq_move_wheels(0, 0)
+        if self.sequencer.simple_event():
+            if not self.__calibrated_heading:
+                self.__calibrate_heading_from_gps(reverse=False)   # 전진 방향 = 전방 +0
+            if not self.__calibrated_heading:
+                print("[초기화:executor.seq_calibrate_robot_rotation] ⚠ heading 캘리브 실패: "
+                      "앞뒤 모두 이동 불가/노이즈 → 자이로 영점 미설정(매핑 회전 위험).")
             self.robot.auto_decide_orientation_sensor = True
 
-    def agent_changed(self):
-        """사용 중인 서브 에이전트(follow_walls 등)가 바뀌었는지 체크"""
-        return self.current_agent != self.previous_agent
+    def __calibrate_heading_from_gps(self, reverse):
+        """직전 이동 구간의 GPS heading으로 전방 heading을 산출해 자이로 영점을 세팅한다.
+        reverse=True: 후진 이동(측정방향+π=전방), False: 전진 이동(측정방향=전방).
+        노이즈 강건 centroid 방식 우선, 실패 시 단발, 둘 다 None이면 영점 미설정(미보정)."""
+        heading = self.robot.gps.get_orientation_robust()
+        if heading is None:
+            heading = self.robot.gps.get_orientation()
+        if heading is None:
+            return
+        offset = np.pi if reverse else 0.0
+        true_forward = Angle(heading.radians + offset)
+        true_forward.normalize()
+        self.robot.gyroscope.set_orientation(true_forward)
+        self.__calibrated_heading = True
+
