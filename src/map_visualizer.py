@@ -20,7 +20,6 @@ import cv2 as cv
 import math
 
 from mapping.mapper import Mapper
-from flow_control.step_counter import StepCounter
 
 
 # 각 레이어의 BGR 색상
@@ -58,7 +57,9 @@ class MapVisualizer:
         self._mapper = mapper
         self._path: list = []        # A* 경로 (grid index 목록)
         self._target = None          # 현재 목표 위치 (array index np.array)
-        self.__render_counter = StepCounter(10)
+        self._frame_skip = 0         # 매 N프레임마다 1회 렌더링 (성능)
+        self._frame_count = 0
+        self._render_every = 6       # 6프레임마다 한 번 렌더
 
     def set_path(self, path: list):
         """PathFinder에서 계산된 A* 경로를 설정합니다 (grid index 목록)."""
@@ -81,14 +82,18 @@ class MapVisualizer:
         if target is not None:
             self._target = target
 
-        if self.__render_counter.check():
-            if self._mapper.robot_position is not None:
-                image = self._render()
-                display = cv.resize(image, (_DISPLAY_SIZE, _DISPLAY_SIZE),
-                                    interpolation=cv.INTER_NEAREST)
-                cv.imshow(_WINDOW_NAME, display)
-                cv.waitKey(1)
-        self.__render_counter.increase()
+        self._frame_count += 1
+        if self._frame_count % self._render_every != 0:
+            return
+
+        if self._mapper.robot_position is None:
+            return
+
+        image = self._render()
+        display = cv.resize(image, (_DISPLAY_SIZE, _DISPLAY_SIZE),
+                            interpolation=cv.INTER_NEAREST)
+        cv.imshow(_WINDOW_NAME, display)
+        cv.waitKey(1)
 
     def _render(self) -> np.ndarray:
         """모든 레이어를 합성한 이미지를 반환합니다."""
@@ -113,16 +118,11 @@ class MapVisualizer:
         # ── 5. 벽/장애물 (occupied) ───────────────────────────────────
         image[arrays["occupied"]] = _COLORS["wall"]
 
-        # ── 6. 조난자 위치 (뭉치당 마커 1개) ──────────────────────────
-        # 픽셀마다 원을 그리면 인접 감지 픽셀이 뭉쳐 거대한 해 모양이 됨 →
-        # 연결 성분(connected component)별 중심에 작은 원 하나만 표시.
-        victims_mask = arrays["victims"].astype(np.uint8)
-        if victims_mask.any():
-            n_comp, _, _, centroids = cv.connectedComponentsWithStats(victims_mask)
-            for i in range(1, n_comp):
-                pt = (int(centroids[i][0]), int(centroids[i][1]))
-                cv.circle(image, pt, 3, _COLORS["victim"], -1)
-                cv.circle(image, pt, 3, (255, 255, 255), 1)  # 흰색 테두리로 더 선명하게
+        # ── 6. 조난자 위치 (작은 원) ──────────────────────────────────
+        victim_positions = np.argwhere(arrays["victims"])
+        for pos in victim_positions:
+            cv.circle(image, (pos[1], pos[0]), 5, _COLORS["victim"], -1)
+            cv.circle(image, (pos[1], pos[0]), 5, (255, 255, 255), 1)  # 흰색 테두리로 더 선명하게
 
         # ── 7. A* 계획 경로 선 ────────────────────────────────────────
         if len(self._path) >= 2:

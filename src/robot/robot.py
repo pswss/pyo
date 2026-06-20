@@ -112,9 +112,6 @@ class Robot:
         self.lidar.set_orientation(self.orientation)
         self.lidar.update()
 
-        # 벽 거리유지: 전방 벽 근접 여부를 구동 베이스에 전달(전진 모드 차단용)
-        self.drive_base.front_blocked = self.lidar.front_blocked
-
         self.right_camera.update(self.orientation)
         self.left_camera.update(self.orientation)
         self.center_camera.update(self.orientation)

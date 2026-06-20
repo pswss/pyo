@@ -35,9 +35,7 @@ class PoseManager:
 
         self.orientation_sensor = self.GYROSCOPE          # 기본값: 자이로스코프 사용
         self.previous_orientation_sensor = self.GYROSCOPE
-        # GPS position remains useful in Erebus 26, but its noisy heading
-        # estimate must not continuously rotate the lidar map.
-        self.automatically_decide_orientation_sensor = False
+        self.automatically_decide_orientation_sensor = True  # True면 자동 선택, False면 수동 지정
 
         self.position_offsets = position_offsets  # 시작점 오프셋 보정값
 
@@ -54,7 +52,7 @@ class PoseManager:
 
         # GPS로 전역 위치 갱신
         self.__previous_position = self.__position
-        self.__position = self.gps.position
+        self.__position = self.gps.get_position()
 
         # 조건에 따라 방향 센서 자동 선택
         if self.automatically_decide_orientation_sensor:
@@ -69,7 +67,6 @@ class PoseManager:
             self.orientation_sensor = self.GPS
         else:
             self.orientation_sensor = self.GYROSCOPE
-            self.gps.reset_orientation_reference()
 
     def robot_is_going_straight(self, average_wheel_velocity, wheel_velocity_difference) -> bool:
         """로봇이 직진 중인지 판단: 각속도 작고, 속도 충분하고, 좌우 속도 차 작으면 직진"""
@@ -79,19 +76,16 @@ class PoseManager:
 
     def calculate_orientation(self):
         """선택된 센서로 현재 방향 각도를 계산합니다. GPS 사용 시 자이로도 동기화합니다."""
-        if self.orientation_sensor == self.GYROSCOPE:
+        gps_orientation = self.gps.get_orientation()
+
+        if self.orientation_sensor == self.GYROSCOPE or gps_orientation is None:
             self.orientation = self.gyroscope.get_orientation()
             if SHOW_DEBUG: print(f"[방향센서:pose_manager.calculate_orientation] 자이로스코프 사용: 방향={self.orientation.degrees:.1f}°, 각속도={self.gyroscope.get_angular_velocity().degrees:.2f}°/step")
-            return
-
-        gps_orientation = self.gps.get_orientation()
-        if gps_orientation is not None:
+        else:
             self.orientation = gps_orientation
             # GPS 값으로 자이로스코프를 교정하여 드리프트를 보정
             self.gyroscope.set_orientation(self.orientation)
             if SHOW_DEBUG: print(f"[방향센서:pose_manager.calculate_orientation] GPS 사용: 방향={self.orientation.degrees:.1f}°, 위치=({self.__position.x:.4f},{self.__position.y:.4f})m, 자이로 동기화 완료")
-        else:
-            self.orientation = self.gyroscope.get_orientation()
 
     @property
     def position(self):

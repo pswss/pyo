@@ -1,4 +1,3 @@
-import math
 from copy import copy, deepcopy
 
 import numpy as np
@@ -8,6 +7,7 @@ from data_structures.vectors import Position2D
 from data_structures.angle import Angle
 
 from data_structures.compound_pixel_grid import CompoundExpandablePixelGrid
+from data_structures.tile_color_grid import TileColorExpandableGrid
 
 from mapping.wall_mapper import WallMapper
 from mapping.floor_mapper import FloorMapper
@@ -17,8 +17,8 @@ from mapping.array_filtering import ArrayFilterer
 
 from mapping.robot_mapper import RobotMapper
 from mapping.fixture_mapper import FixtureMapper
-from mapping.area_tracker import AreaTracker, classify_passage_patch
 
+from mapping.data_extractor import PointCloudExtarctor, FloorColorExtractor
 from fixture_detection.fixture_detection import FixtureDetector
 
 from flags import SHOW_DEBUG, SHOW_GRANULAR_NAVIGATION_GRID, DO_WAIT_KEY, SHOW_LIVE_MAP
@@ -47,15 +47,16 @@ class Mapper:
         self.start_position = None      # 미션 시작 위치 (register_start로 등록)
         self.robot_grid_index = None    # 로봇 위치의 그리드 인덱스
 
-        # Area 1~4 추적 (통로 횡단 감지). Area4 체류 위치는 최종 행렬 '*' 채움에 사용.
-        self.area_tracker = AreaTracker()
-
         # -------- 픽셀 그리드 초기화 --------
         pixels_per_tile = 10           # 타일 한 칸당 픽셀 수
         self.pixel_grid = CompoundExpandablePixelGrid(
             initial_shape=np.array([1, 1]),
             pixel_per_m=pixels_per_tile / self.quarter_tile_size,
             robot_radius_m=(self.robot_diameter / 2) - 0.008)
+
+        self.tile_color_grid = TileColorExpandableGrid(
+            initial_shape=np.array((1, 1)),
+            tile_size=self.tile_size)
 
         # -------- 각 역할별 맵퍼 초기화 --------
         self.wall_mapper = WallMapper(self.pixel_grid, robot_diameter)
@@ -76,6 +77,10 @@ class Mapper:
         self.fixture_mapper = FixtureMapper(
             pixel_grid=self.pixel_grid,
             tile_size=self.tile_size)
+
+        # -------- 데이터 추출기 --------
+        self.point_cloud_extractor = PointCloudExtarctor(resolution=6)
+        self.floor_color_extractor = FloorColorExtractor(tile_resolution=50)
 
         self.fixture_detector = FixtureDetector(self.pixel_grid)
 
@@ -129,14 +134,6 @@ class Mapper:
         if camera_images is not None and lidar_detections is not None:
             self.fixture_detector.map_fixtures(camera_images, self.robot_position)
 
-        # 5-1. 구역(Area 1~4) 추적: 로봇 발밑 바닥색으로 통로 위 여부 판별
-        robot_array_index = self.pixel_grid.grid_index_to_array_index(self.robot_grid_index)
-        half = 4   # 발밑 8×8px(≈5cm) 패치 — 타일 경계 걸침 영향 최소화
-        r0 = max(robot_array_index[0] - half, 0)
-        c0 = max(robot_array_index[1] - half, 0)
-        patch = self.pixel_grid.arrays["floor_color"][r0:r0 + half * 2, c0:c0 + half * 2]
-        self.area_tracker.step(classify_passage_patch(patch), self.robot_position)
-
         # 6. 점유 영역(벽 OR 구멍) 계산
         self.occupied_mapper.map_occupied()
 
@@ -154,51 +151,16 @@ class Mapper:
         self.start_position = deepcopy(robot_position)
         print(f"[맵퍼:mapper.register_start] 시작 위치 등록: ({self.start_position.x:.4f}, {self.start_position.y:.4f})m, 그리드={self.pixel_grid.coordinates_to_grid_index(self.start_position)}")
 
+    def get_grid_for_bonus(self):
+        pass  # TODO: 보너스 점수용 그리드 반환 (미구현)
+
+    def __lidar_to_node_grid(self):
+        pass  # 이전 노드 그리드 방식의 잔재 (현재 미사용)
+
     def has_detected_victim_from_position(self):
         """현재 로봇 위치에서 이미 조난자를 보고한 적 있는지 확인합니다 (중복 보고 방지)."""
         robot_array_index = self.pixel_grid.grid_index_to_array_index(self.robot_grid_index)
         return self.pixel_grid.arrays["robot_detected_fixture_from"][robot_array_index[0], robot_array_index[1]]
-
-    # 전방 구멍(블랙홀) 검사 파라미터. 검사점 = 전방 6cm, 반경 2.5cm. ★시뮬 튜닝
-    hole_check_distance = 0.06
-    hole_check_radius = 0.025
-
-    def _front_point(self, position, orientation, distance):
-        """로봇 전방 distance(m) 지점의 절대좌표. (전방 = (sinθ, cosθ), get_angle_to 규약)"""
-        return (position.x + distance * math.sin(orientation.radians),
-                position.y + distance * math.cos(orientation.radians))
-
-    def is_hole_in_front(self, robot_position, robot_orientation) -> bool:
-        """전방 검사점 주변에 구멍(holes) 픽셀이 있으면 True — 회피 기동 트리거용."""
-        fx, fy = self._front_point(robot_position, robot_orientation, self.hole_check_distance)
-        idx = self.pixel_grid.coordinates_to_array_index(np.array([fx, fy]))
-        r = round(self.hole_check_radius * self.pixel_grid.resolution)
-        holes = self.pixel_grid.arrays["holes"]
-        min_x = max(idx[0] - r, 0)
-        max_x = min(idx[0] + r + 1, holes.shape[0])
-        min_y = max(idx[1] - r, 0)
-        max_y = min(idx[1] + r + 1, holes.shape[1])
-        if min_x >= max_x or min_y >= max_y:
-            return False
-        return bool(np.any(holes[min_x:max_x, min_y:max_y]))
-
-    def is_hole_between(self, pos_a, pos_b) -> bool:
-        """a→b 직선 경로가 구멍 픽셀을 지나는지 — 웨이포인트·구멍 겹침 판정용.
-        겹칠 때만 회피 기동(후진+180°)을 발동하고, 아니면 경로계획 우회에 맡긴다."""
-        dist = pos_a.get_distance_to(pos_b)
-        if dist < 1e-6:
-            return False
-        steps = max(int(dist / 0.01), 1)
-        holes = self.pixel_grid.arrays["holes"]
-        for i in range(steps + 1):
-            t = i / steps
-            x = pos_a.x + (pos_b.x - pos_a.x) * t
-            y = pos_a.y + (pos_b.y - pos_a.y) * t
-            idx = self.pixel_grid.coordinates_to_array_index(np.array([x, y]))
-            if (0 <= idx[0] < holes.shape[0] and 0 <= idx[1] < holes.shape[1]
-                    and holes[idx[0], idx[1]]):
-                return True
-        return False
 
     def is_close_to_swamp(self):
         """

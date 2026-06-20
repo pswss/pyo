@@ -36,41 +36,13 @@ class Lidar(TimedSensor):
         self.rotation_offset = 0
 
         self.max_detection_distance = 0.06 * 8   # 최대 감지 거리(m) = 약 0.48m
-        # 최소 감지 거리 0.036 유지 필수. 0.015로 내렸더니 로봇 자기 구조물(바퀴/카메라
-        # 마운트) 반사점(~2.4cm)이 통과 → front_distance가 방향 무관 0.024m 상수로 고정
-        # → 전진 차단 영구 발동(실런 로그: 제자리 회전 중에도 blocked). 이 필터의 실제
-        # 역할 = 자기 몸 반사 제거. 근접 벽 미등록은 occupy_point traversed 거부 완화로
-        # 별도 해결됨. ★시뮬 검증 완료
-        self.min_detection_distance = 0.06 * 0.6
+        self.min_detection_distance = 0.06 * 0.6 # 최소 감지 거리(m) = 약 0.036m (너무 가까운 노이즈 제거)
 
         self.is_point_close = False              # 로봇 바로 앞에 장애물이 있는지 여부
         self.is_point_close_threshold = 0.03     # '가깝다'고 판단하는 거리 임계값(m)
         self.is_point_close_range = (0, 360)     # 가까움 판단에 사용할 각도 범위(도)
 
         self.distance_bias = 0.005               # 라이다 거리 보정값(m)
-
-        # ── 벽 거리유지(전방 아크) ── 벽에 박는 것 방지용. 기존 is_point_close는 각도 버그 +
-        # min_detection_distance(0.036) 때문에 사실상 죽어 있어, 별도로 전방 최소거리를 계산한다.
-        # 전방위가 아니라 전방 아크만 봐서 좁은 복도에서 옆벽 때문에 멈추지 않는다.
-        self.front_distance = self.max_detection_distance  # 진행 경로(swath) 내 최소 전방거리(m)
-        # swept-path 충돌 예측 모델. 스칼라 아크+거리 모델은 ① 넓으면 좁은 통로 옆벽을 잡아
-        # 차단 회전 루프(빙빙)/통로 통과 불가, ② 좁으면 대각 코너 기둥을 놓쳐 박음, ③ fixture
-        # 보고 접근까지 차단 → 셋 다 실패. 대체: "로봇 진행 경로 폭 안(횡오프셋 < 반경+마진)
-        # & 전방 lookahead 내" 인 점만 차단 — 옆벽 무시, 경로 위 코너는 포착. ★시뮬 튜닝
-        # lookahead 5.5cm도 미로 내 상시 차단(이동 불가) 유발 — 3cm = 몸체(~3.5cm 반경
-        # 내 최근접면)에서 수mm 직전, 최후의 비상정지 전용. 평시 회피는 경로계획 담당.
-        self.front_lookahead = 0.03           # 진행 경로상 이 거리 안에 장애물 → 차단
-        # 반폭 4.2cm는 벽 따라 주행 시 옆벽(측면거리 ~4cm)이 swath에 들어와 전방이
-        # 뚫려 있어도 상시 차단됨(실런 로그: 開전방+차단 스팸). 3cm = 몸통 중앙부만,
-        # 옆벽/스침은 허용하고 정면 경로 위 장애물만 잡는다. ★시뮬 튜닝
-        self.front_swath_half_width = 0.03
-        self.front_guard_enabled = True       # 의도적 근접(fixture 보고 접근) 시 executor가 끔
-        self.front_blocked = False
-        self.__front_diag_counter = 0    # 임시 계측: 전방거리 throttle 출력용(인덱스 검증 후 제거)
-        # 전방에 해당하는 raw 라이다 인덱스 중심(body-mounted라 orientation 무관).
-        # getCoordsFromRads(0)=+y(전방) + 포인트 y반전 → 전방 인덱스 ≈ 해상도/2로 유도.
-        # ★시뮬검증: 벽에 정면으로 다가갈 때 front_distance가 줄면 정상. 안 줄면 0.0으로 바꿀 것.
-        self.front_center_index_ratio = 0.5
 
         self.layers_used = layers_used           # 처리할 수직 레이어 번호 목록 (예: (2,))
 
@@ -111,11 +83,6 @@ class Lidar(TimedSensor):
         self.__out_of_bounds_point_cloud = []
         self.__distance_detections = []
 
-        # swath 최소 전방거리 추적 초기화
-        self.front_distance = self.max_detection_distance
-        res = self.horizontal_resolution
-        front_center_i = int(res * self.front_center_index_ratio)
-
         total_depth_array = self.device.getRangeImage()
         # 전체 1D 배열을 레이어별로 분할 (각 레이어 = 수평 360도 스캔 한 줄)
         total_depth_array = divide_into_chunks(total_depth_array, self.horizontal_resolution)
@@ -128,7 +95,7 @@ class Lidar(TimedSensor):
             # 로봇 방향을 반영하여 수평 각도 시작점 설정
             horizontal_angle = self.rotation_offset + ((2 * math.pi) - self.orientation.radians)
 
-            for i, item in enumerate(layer_depth_array):
+            for item in layer_depth_array:
                 if item >= self.max_detection_distance or item == float("inf") or item == float("inf") * -1:
                     # 범위 초과 → 열린 공간 방향으로 max 거리 포인트 등록
                     distance = self.__normalize_distance(self.max_detection_distance, vertical_angle)
@@ -150,26 +117,7 @@ class Lidar(TimedSensor):
                         if self.__in_range_for_close_point(horizontal_angle) and distance < self.is_point_close_threshold:
                             self.is_point_close = True
 
-                        # swept-path 충돌 예측: 진행 경로 폭 안 & 전방인 점의 최소 전방거리 추적
-                        ring_signed = ((i - front_center_i + res // 2) % res) - res // 2
-                        bearing = ring_signed * self.radian_per_detection_horizontally
-                        if abs(bearing) <= math.radians(45):
-                            forward = distance * math.cos(bearing)
-                            lateral = abs(distance * math.sin(bearing))
-                            if 0 < forward < self.front_distance and lateral < self.front_swath_half_width:
-                                self.front_distance = forward
-
                 horizontal_angle += self.radian_per_detection_horizontally
-
-        self.front_blocked = (self.front_guard_enabled
-                              and self.front_distance < self.front_lookahead)
-
-        # ── 임시 계측(인덱스 검증 후 제거): 벽 정면 접근 시 front_distance가 줄면 전방 인덱스 정상 ──
-        self.__front_diag_counter += 1
-        if self.__front_diag_counter % 15 == 0:
-            print(f"[벽거리계측:lidar] front_distance={self.front_distance:.3f}m, "
-                  f"front_blocked={self.front_blocked} "
-                  f"(lookahead {self.front_lookahead:.3f}, guard {self.front_guard_enabled})")
 
         # 빈 클라우드 방지 (mapper가 None 처리 하지 않도록 더미 포인트 삽입)
         if len(self.__out_of_bounds_point_cloud) == 0:

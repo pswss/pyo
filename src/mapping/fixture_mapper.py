@@ -4,7 +4,6 @@ import numpy as np
 import cv2 as cv
 
 from data_structures.compound_pixel_grid import CompoundExpandablePixelGrid
-from flow_control.step_counter import StepCounter
 
 
 class FixtureMapper:
@@ -35,48 +34,25 @@ class FixtureMapper:
                                                           template_radious, 1, 1)     # 테두리만 (+1)
 
         self.detected_from_radius = round(0.10 * self.grid.resolution)  # 보고 기록 반경(픽셀) — 10cm: 같은 fixture 중복 보고 방지
-        self.__detection_zone_counter = StepCounter(15)
 
     def generate_detection_zone(self):
         """벽 픽셀 근처에 조난자 도달 가능 마진 영역(fixture_distance_margin)을 생성합니다."""
-        if self.__detection_zone_counter.check():
-            occupied_as_int = self.grid.arrays["walls"].astype(np.int8)
-            self.grid.arrays["fixture_distance_margin"] = cv.filter2D(
-                occupied_as_int, -1, self.fixture_distance_margin_template) > 0
-        self.__detection_zone_counter.increase()
+        occupied_as_int = self.grid.arrays["walls"].astype(np.int8)
+        self.grid.arrays["fixture_distance_margin"] = cv.filter2D(
+            occupied_as_int, -1, self.fixture_distance_margin_template) > 0
 
     def clean_up_fixtures(self):
-        """점유된 영역(occupied=True) 위에 잘못 표시된 조난자/위험물 마커를 제거합니다."""
+        """점유된 영역(occupied=True) 위에 잘못 표시된 조난자 마커를 제거합니다."""
         self.grid.arrays["victims"][self.grid.arrays["occupied"]] = False
-        self.grid.arrays["hazmats"][self.grid.arrays["occupied"]] = False
 
     def map_detected_fixture(self, robot_position):
         """
-        조난자 보고 완료를 robot_detected_fixture_from 레이어에 기록합니다.
-
-        스탬프 2종:
-        1) 로봇 위치 중심 원 — 같은 자리 중복 보고 방지(기존).
-        2) 근처(15cm 내) victim/hazmat 포인트 중심 원 — 로봇 원만으론 victim 중심
-           zone of influence의 반대편 초승달이 살아남아 GoToFixtures 후보로 남음
-           → 보고 후에도 웨이포인트가 그 fixture에 고정(실런 증상). 한 번 보고로
-           해당 fixture의 후보 전체를 소멸시킨다.
+        조난자를 보고한 로봇 위치(반경 2cm 원)를 robot_detected_fixture_from 레이어에 기록합니다.
+        이 레이어를 확인하여 같은 위치에서 중복 보고하지 않도록 합니다.
         """
         robot_array_index = self.grid.coordinates_to_array_index(robot_position)
         template = self.__get_circle_template_indexes(self.detected_from_radius, robot_array_index)
         self.grid.arrays["robot_detected_fixture_from"][template[0], template[1]] = True
-
-        # 보고한 fixture 주변 zone 제거
-        search_r = round(0.15 * self.grid.resolution)
-        r0 = max(int(robot_array_index[0]) - search_r, 0)
-        c0 = max(int(robot_array_index[1]) - search_r, 0)
-        window = (self.grid.arrays["victims"][r0:r0 + search_r * 2 + 1, c0:c0 + search_r * 2 + 1]
-                  | self.grid.arrays["hazmats"][r0:r0 + search_r * 2 + 1, c0:c0 + search_r * 2 + 1])
-        for (wr, wc) in np.argwhere(window):
-            fixture_idx = (r0 + int(wr), c0 + int(wc))
-            t = self.__get_circle_template_indexes(self.detected_from_radius, fixture_idx)
-            valid = ((t[0] >= 0) & (t[1] >= 0) &
-                     (t[0] < self.grid.array_shape[0]) & (t[1] < self.grid.array_shape[1]))
-            self.grid.arrays["robot_detected_fixture_from"][t[0][valid], t[1][valid]] = True
 
     def __get_circle_template_indexes(self, radius, offsets=(0, 0)):
         """지정 반경의 원 안에 포함되는 배열 인덱스 목록을 오프셋과 함께 반환합니다."""

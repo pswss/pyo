@@ -2,6 +2,7 @@ import numpy as np
 import cv2 as cv
 from data_structures.compound_pixel_grid import CompoundExpandablePixelGrid
 from data_structures.angle import Angle
+import imutils
 from copy import copy, deepcopy
 from robot.devices.camera import CameraImage
 from typing import List
@@ -119,9 +120,7 @@ class FloorMapper:
 
     def rotate_image_to_angle(self, image: np.ndarray, angle: Angle):
         """이미지를 중심을 기준으로 지정된 각도만큼 회전합니다."""
-        center = (image.shape[1] // 2, image.shape[0] // 2)
-        matrix = cv.getRotationMatrix2D(center, angle.degrees, 1.0)
-        return cv.warpAffine(image, matrix, (image.shape[1], image.shape[0]))
+        return imutils.rotate(image, angle.degrees, (image.shape[0] // 2, image.shape[1] // 2))
 
 
     def get_unified_povs(self, camera_images: List[CameraImage]):

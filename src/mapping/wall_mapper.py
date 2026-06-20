@@ -3,7 +3,8 @@ import cv2 as cv
 from data_structures.compound_pixel_grid import CompoundExpandablePixelGrid
 
 from data_structures.vectors import Position2D
-from raster_drawing import line_indices
+
+import skimage
 
 class WallMapper:
     """
@@ -63,9 +64,7 @@ class WallMapper:
         for p in point_cloud:
             point = np.array(p, dtype=float) + robot_position
 
-            robot_grid_index = self.grid.coordinates_to_grid_index(robot_position)
             point_grid_index = self.grid.coordinates_to_grid_index(point)
-            self.grid.expand_to_grid_index(robot_grid_index)
             self.grid.expand_to_grid_index(point_grid_index)
 
             robot_array_index = self.grid.coordinates_to_array_index(robot_position)
@@ -86,9 +85,7 @@ class WallMapper:
         for p in point_cloud:
             point = np.array(p, dtype=float) + robot_position
 
-            robot_grid_index = self.grid.coordinates_to_grid_index(robot_position)
             point_grid_index = self.grid.coordinates_to_grid_index(point)
-            self.grid.expand_to_grid_index(robot_grid_index)
             self.grid.expand_to_grid_index(point_grid_index)
 
             robot_array_index = self.grid.coordinates_to_array_index(robot_position)
@@ -154,18 +151,11 @@ class WallMapper:
         단, 이미 로봇이 지나간 곳(traversed)은 벽으로 등록하지 않습니다.
         """
         if not self.grid.arrays["walls"][point_array_index[0], point_array_index[1]]:
-            detected_points = self.grid.arrays["detected_points"]
-            row, col = point_array_index
-            confirmed_count = self.to_boolean_threshold + 1
+            self.grid.arrays["detected_points"][point_array_index[0], point_array_index[1]] += 1
 
-            # A traversed pixel cannot become a wall; saturate its counter as
-            # well so repeated scans cannot overflow the uint8 layer.
-            if detected_points[row, col] < confirmed_count:
-                detected_points[row, col] += 1
-
-            if detected_points[row, col] >= confirmed_count:
-                if not self.grid.arrays["traversed"][row, col]:
-                    self.grid.arrays["walls"][row, col] = True
+            if self.grid.arrays["detected_points"][point_array_index[0], point_array_index[1]] > self.to_boolean_threshold:
+                if not self.grid.arrays["traversed"][point_array_index[0], point_array_index[1]]:
+                    self.grid.arrays["walls"][point_array_index[0], point_array_index[1]] = True
 
     def mark_point_as_seen_by_lidar(self, robot_array_index, point_array_index):
         """로봇 위치에서 포인트까지의 선을 seen_by_lidar 레이어에 그립니다."""
@@ -174,12 +164,8 @@ class WallMapper:
 
     def __draw_bool_line(self, array, point1, point2):
         """Bresenham 직선 알고리즘으로 두 점 사이의 직선 경로를 True로 표시합니다."""
-        indexes = line_indices(point1[0], point1[1], point2[0], point2[1])
-        rows = indexes[0][:-2]
-        cols = indexes[1][:-2]
-        valid = ((rows >= 0) & (cols >= 0) &
-                 (rows < array.shape[0]) & (cols < array.shape[1]))
-        array[rows[valid], cols[valid]] = True  # 끝 2픽셀 제외 (포인트 자체는 제외)
+        indexes = skimage.draw.line(point1[0], point1[1], point2[0], point2[1])
+        array[indexes[0][:-2], indexes[1][:-2]] = True  # 끝 2픽셀 제외 (포인트 자체는 제외)
         return array
 
     def __reset_seen_by_lidar(self):

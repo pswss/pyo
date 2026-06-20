@@ -293,8 +293,7 @@ class RescueRobot:
     def send_final_map(self):
         """완성된 지도를 서버로 보냅니다. 미션 중에도 중간 저장 용도로 사용할 수 있습니다."""
         final_matrix = self._final_matrix_creator.pixel_grid_to_final_grid(
-            self._mapper.pixel_grid, self._mapper.start_position,
-            area4_positions=self._mapper.area_tracker.area4_positions
+            self._mapper.pixel_grid, self._mapper.start_position
         )
         self._robot.comunicator.send_map(final_matrix)
         print("[RescueRobot] 최종 지도 전송 완료")
