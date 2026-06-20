@@ -25,18 +25,21 @@ class FixtureType:
 
 class FixtureClasiffier:
     """
-    v26 fixture 분류기.
+    v26 fixture 분류기 (RCJ 2026 규정 §3.7 기준).
 
-    분류 체계:
-    - Victim (Φ/Ψ/Ω): 흑백 심볼 → H/S/U 보고
-    - HazardMap/CognitiveTarget (UN 플래카드): 색상 패턴 → F/P/C/O 보고
-    - Fake: 벽에서 돌출된 3D 심볼 → 보고 안 함
+    2026 토큰 체계 (옛 UN 플래카드 hazmat 폐지):
+    - Letter victim: 벽에 인쇄된 검정 대문자 심볼(Φ→H, Ψ→S, Ω→U). 흑백만.
+    - Cognitive target: 지름 5cm 동심원 5개(원+4링). 색값 합산
+      (검정 -2, 빨강 -1, 노랑 0, 초록 +1, 파랑 +2) → 0:F 1:P 2:C 3:O,
+      그 외 합 → fake victim(보고 안 함).
+    - Fake letter victim: 글자가 3D로 돌출 → depth 센서로만 구분(여기선 미처리).
 
     분류 순서:
-    1. already_detected 체크
-    2. 빨강/노랑 존재 → hazmat 분류 (F/P/C/O)
-    3. 흑백만 → victim 분류 (Φ/Ψ/Ω → H/S/U)
-    4. 매칭 없음 → None (보고 안 함, 랜덤 추측 제거)
+    1. already_detected → None
+    2. 채도색(R/Y/G/B) 존재 → cognitive target (링 합산 → F/P/C/O)
+       (양수합 P/C/O는 항상 초록/파랑 포함, F=0은 노랑 포함 → 채도색 유무로 정확히 라우팅)
+    3. 흑백만 → letter victim (Φ/Ψ/Ω → H/S/U)
+    4. 매칭 없음 → None
     """
     def __init__(self):
         self.victim_classifier = VictimClassifier()
@@ -54,18 +57,6 @@ class FixtureClasiffier:
         }
         self.min_fixture_height = 16
         self.min_fixture_width_factor = 0.8
-
-        # hazmat 분류용 색상 범위 (100x100 이미지 기준, 우선순위 순)
-        self.hazmat_types = (
-            FixtureType("organic_peroxide", "O", {"red":   (500, math.inf),
-                                                   "yellow":(500, math.inf)}),
-            FixtureType("flammable", "F",        {"white": (500, math.inf),
-                                                   "red":   (500, math.inf)}),
-            FixtureType("corrosive", "C",        {"white": (700,  4500),
-                                                   "black": (900, 3000)}),
-            FixtureType("poison",    "P",        {"white": (2000, 5000),
-                                                   "black": (100,  1000)}),
-        )
 
         # already_detected 판별 규칙
         self.already_detected_types = (
@@ -132,14 +123,13 @@ class FixtureClasiffier:
 
     def classify_fixture(self, fixture) -> str:
         """
-        fixture를 분류하여 보고 글자를 반환합니다.
+        fixture를 분류하여 보고 글자를 반환합니다 (RCJ 2026 §3.7).
 
-        v26 분류 순서:
+        분류 순서:
         1. already_detected → None
-        2. 초록/파랑 존재 → CognitiveTarget (5-ring 동심원, 합계 0~3 → F/P/C/O, 음수/초과 → None)
-        3. 빨강/노랑 있음 → hazmat 플래카드 (F/P/C/O)
-        4. 흑백만 → victim (Φ→H, Ψ→S, Ω→U)
-        5. 매칭 없음 → None (보고 안 함)
+        2. 채도색(R/Y/G/B) 존재 → cognitive target (동심원 5개 합산 0~3 → F/P/C/O, 그 외 → None=fake)
+        3. 흑백만 → letter victim (Φ→H, Ψ→S, Ω→U)
+        4. 매칭 없음 → None (보고 안 함)
         """
         image = cv.resize(fixture["image"], (100, 100), interpolation=cv.INTER_AREA)
         color_counts = self.count_colors(image)
@@ -156,35 +146,24 @@ class FixtureClasiffier:
                     print("[Fixture] already_detected → None")
                 return None
 
-        # 2) 초록/파랑 존재 → CognitiveTarget (5-ring 동심원)
-        if color_counts.get("green", 0) > 50 or color_counts.get("blue", 0) > 50:
+        # 2) 채도색(R/Y/G/B) 존재 → cognitive target (동심원 합산 → F/P/C/O)
+        #    2026 hazmat은 동심원만(옛 UN 플래카드 폐지). 유효 target은 항상 채도색 포함
+        #    (P/C/O=양수합→초록/파랑, F=0→노랑)이라 채도색 유무로 victim과 분리.
+        saturated = (color_counts["red"] + color_counts["yellow"]
+                     + color_counts.get("green", 0) + color_counts.get("blue", 0))
+        if saturated > 300:
             return self._classify_cognitive_target(fixture)
 
-        # 3) 빨강/노랑 존재 → hazmat 플래카드 (F/P/C/O)
-        if color_counts["red"] > 300 or color_counts["yellow"] > 300:
-            return self._classify_hazmat(color_counts)
-
-        # 4) 흑백만 → victim (Φ/Ψ/Ω)
+        # 3) 흑백만 → letter victim (Φ/Ψ/Ω → H/S/U)
         if color_counts["black"] > 300 and color_counts["white"] > 300:
             letter = self.victim_classifier.classify_victim(fixture)
             if SHOW_FIXTURE_DEBUG:
                 print(f"[Fixture] victim 분류 결과: '{letter}'")
             return letter
 
-        # 5) 매칭 없음
+        # 4) 매칭 없음
         if SHOW_FIXTURE_DEBUG:
             print("[Fixture] 매칭 없음 → None")
-        return None
-
-    def _classify_hazmat(self, color_counts) -> str:
-        """색상 픽셀 수로 hazmat 종류(F/P/C/O)를 판별합니다."""
-        for ht in self.hazmat_types:
-            if ht.is_fixture(color_counts):
-                if SHOW_FIXTURE_DEBUG:
-                    print(f"[Fixture] hazmat: {ht.fixture_type} → '{ht.default_letter}'")
-                return ht.default_letter
-
-        # hazmat 색상은 있지만 정확한 매칭 없음 → 확신 없으면 보고 안 함
         return None
 
     def _classify_cognitive_target(self, fixture) -> str:
