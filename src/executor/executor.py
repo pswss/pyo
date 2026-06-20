@@ -65,7 +65,8 @@ class Executor:
         self.fixture_detector = FixtureClasiffier() # 카메라 비전 기반 조난자(알파벳) 인식기
 
         self.final_matrix_creator = FinalMatrixCreator(mapper.tile_size, mapper.pixel_grid.resolution)
-        
+        self.reported_fixtures = []  # 최종 맵 행렬용: 보고한 토큰 (위치, 글자) 누적
+
         # --- 4. 플래그(상태 변수) 및 시퀀서용 함수 매핑 ---
         self.mapping_enabled = False          # 맵핑을 할지 말지 결정
         self.victim_reporting_enabled = False # 조난자 탐지를 할지 말지 결정
@@ -457,14 +458,14 @@ class Executor:
     def state_end(self, change_state_function):
         """[미션 완료 상태] 완성된 지도를 추출하고 통신으로 본부에 보낸 후 끝냅니다."""
         final_matrix = self.final_matrix_creator.pixel_grid_to_final_grid(self.mapper.pixel_grid, self.mapper.start_position,
-            area4_positions=self.mapper.area_tracker.area4_positions)
+            area4_positions=self.mapper.area_tracker.area4_positions, reported_fixtures=self.reported_fixtures)
         self.robot.comunicator.send_map(final_matrix)
         self.robot.comunicator.send_end_of_play()
 
     def state_send_map(self, change_state_function):
         """[지도 강제 전송 상태] 시간이 다 되었을 때 지도를 보내고 다시 탐색으로 돌아갑니다."""
         final_matrix = self.final_matrix_creator.pixel_grid_to_final_grid(self.mapper.pixel_grid, self.mapper.start_position,
-            area4_positions=self.mapper.area_tracker.area4_positions)
+            area4_positions=self.mapper.area_tracker.area4_positions, reported_fixtures=self.reported_fixtures)
         self.robot.comunicator.send_map(final_matrix)
         self.map_sent = True
         change_state_function("explore")
@@ -528,6 +529,11 @@ class Executor:
             if self.sequencer.simple_event():
                 print(f"[조난자 보고:executor.state_report_fixture] 글자='{self.letter_to_report}', 위치=({self.robot.raw_position.x:.4f}, {self.robot.raw_position.y:.4f})m, 시뮬 시간={self.robot.time:.1f}s")
                 self.robot.comunicator.send_victim(self.robot.raw_position, self.letter_to_report)
+                # 최종 맵 행렬에 넣기 위해 토큰(위치, 글자) 저장. 위치는 로봇 전방(벽 쪽)으로
+                # ~6cm 보정 (로봇은 마진에서 보고 → 토큰/벽은 바라보는 방향에 있음).
+                fx = self.robot.position.x + 0.06 * math.sin(self.report_orientation.radians)
+                fy = self.robot.position.y + 0.06 * math.cos(self.report_orientation.radians)
+                self.reported_fixtures.append((Position2D(fx, fy), self.letter_to_report))
                 if self.letter_to_report in ('F', 'P', 'C', 'O'):
                     idx = self.mapper.pixel_grid.coordinates_to_array_index(self.robot.position)
                     rr, cc = skimage.draw.disk(idx, 4)
