@@ -92,7 +92,10 @@ class FixtureClasiffier:
             cv.imshow("image", image)
 
         binary_images = []
-        for f in self.color_filters.values():
+        # 탐지 윤곽: victim(흑백) + cognitive target 링 색(노랑/빨강/초록/파랑)을 모두 포함.
+        # 흑백+노랑만 쓰면 초록/파랑/빨강 위주의 cognitive target은 윤곽이 안 잡혀 탐지조차
+        # 안 됐다(토큰 대량 누락의 진짜 원인). 분류는 classify_fixture가 따로 한다.
+        for f in list(self.color_filters.values()) + list(self.extra_color_filters.values()):
             binary_images.append(f.filter(image))
         binary_image = self.sum_images(binary_images)
 
